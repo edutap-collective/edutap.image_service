@@ -19,12 +19,7 @@ dependencies = [
     # named even though db_definitions pulls it in, because a dependency one relies
     # on but does not declare disappears the moment the package in between drops it.
     "edutap.data_models @ git+https://github.com/edutap-collective/edutap.data_models@v0.2.0",
-    # A commit rather than a tag, which is the exception here and should not last:
-    # `public.photo` and `public.photo_review` landed on main after v0.1.3, and no
-    # release has been cut since. Pinning the branch would let the schema this
-    # service writes change under it without a version to point at. Replace this
-    # with the tag as soon as db_definitions cuts one.
-    "edutap.db_definitions @ git+https://github.com/edutap-collective/edutap.db_definitions@d26786e8",
+    "edutap.db_definitions @ git+https://github.com/edutap-collective/edutap.db_definitions@v0.1.5",
     "fastapi>=0.115",
     # The client for edutap.image_api. httpx2 rather than httpx: starlette 1.3
     # prefers it and warns whenever it has to fall back, and it is the house
