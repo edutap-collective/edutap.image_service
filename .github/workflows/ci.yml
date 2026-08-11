@@ -1,0 +1,54 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Nothing here is locked: every requirement is a lower bound and the eduTAP
+  # references are pinned to an immutable ref. Everything from a public index still
+  # drifts, so a suite that passed on the last commit can fail with nothing changed
+  # here. Weekly, Monday morning UTC, on main only.
+  schedule:
+    - cron: "23 5 * * 1"
+# Every job installs into a uv virtual environment and calls the interpreter inside
+# it by path. Not `uv pip install --system`: the runner's system interpreter is
+# Debian's and marked EXTERNALLY-MANAGED, so uv refuses it, and for the matrix
+# entries there is no system interpreter at all. Not `uv run` either, for the reason
+# the Makefile gives.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv venv
+      - run: uv pip install -e ".[dev]"
+      - run: .venv/bin/python -m pytest -v
+  integration:
+    # The default run excludes these (addopts), so without this job the
+    # database-backed behaviour would never be exercised in CI.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - run: uv venv
+      - run: uv pip install -e ".[dev]"
+      - run: .venv/bin/python -m pytest -m integration -v
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - run: uv venv
+      - run: uv pip install -e ".[dev]"
+      - run: .venv/bin/python -m ruff check src tests
+      - run: .venv/bin/python -m ruff format --check src tests
+      - run: .venv/bin/python -m ty check src

@@ -1,16 +1,52 @@
 # edutap.image_service
 
-Stores and serves person-related images (for example ID photos) to web wallets.
+Stores, reviews and delivers the photograph of a person — for identity cards and for
+the wallet passes that carry them.
 
-**Status: planned.** To be designed generically; deployments that currently run a
-site-specific image backend switch over afterwards.
+A person uploads a photo. The service has it validated by
+[`edutap.image_api`](https://github.com/edutap-collective/edutap.image_api), keeps it
+as an immutable version, and lets a reviewer approve or reject it. Exactly one
+version per person is active at a time, and that is what cards and passes show.
+Where there is none, the same URL delivers a recognisable placeholder — which
+matters more than it sounds, because a wallet provider bakes that URL into an issued
+pass and will fetch it long after.
+
+**Status: in construction.** The design is settled and the contract tables are
+merged; the service is being built slice by slice. See
+[the plan](superpowers/plans/2026-08-11-person-photo-service.md) for the order and
+what has landed.
 
 ## Delimitation
 
-* `edutap.image_service` (this package) — storage and delivery of the images a
-  wallet pass references.
-* `edutap.image_api` — analysis and transformation of images (biometric checks,
-  auto-crop for ID photos).
+* `edutap.image_service` (this package) — storage, review and delivery.
+* `edutap.image_api` — analysis and transformation: biometric checks, face-centred
+  crops, masks. Stateless.
 
-The two are separate on purpose: transformation is a stateless computation,
-delivery needs storage, access control and cache-friendly URLs.
+The two are separate on purpose: transformation is a computation, while delivery
+needs storage, access control and cache-friendly URLs.
+
+## What it is deliberately ignorant of
+
+Wallet passes, card types, institutional roles, mail templates. It reports facts —
+whether a person has a real photograph, how it was verified, what that says about
+its provenance — and whoever issues a card decides what to do with them. A generic
+service that grows one institution's policy stops being adoptable by the next one.
+
+## Development
+
+```console
+make venv          # create .venv and install with the dev extra
+make test-local    # unit tests; no database, no bucket
+make lint          # ruff check, ruff format --check, ty
+```
+
+CI calls the same targets rather than repeating their commands, so a run that is
+green here is green there.
+
+## Documentation
+
+* [Design record](superpowers/specs/2026-08-11-person-photo-service-design.md) — the
+  domain model, the storage layout, the tables, the API surface, and the alternative
+  that was rejected at each fork.
+* [Implementation plan](superpowers/plans/2026-08-11-person-photo-service.md) — the
+  slices and their order.
