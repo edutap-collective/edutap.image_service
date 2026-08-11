@@ -20,16 +20,19 @@ API exists has to be corrected in two places.
 |---|---|---|
 | 1 | Package skeleton and settings | tooling, CI, `settings.py` |
 | 2 | State machine | `states.py` — pure, no I/O |
-| 3 | Object store | `objectstore.py` — key layout, put/get/purge |
-| 4 | Repository | `repository.py` — the two tables plus the `person_view` reference, in one transaction. **Also removes the temporary exit-5 guard in the `integration` CI job**, which exists only because no integration test does yet |
+| 3 | Object store | `objectstore.py` — key layout, put/get/purge — **done** |
+| 4 | Repository | `repository.py` — the two tables plus the `person_view` reference, in one transaction; the temporary exit-5 guard in the `integration` CI job is gone with it — **done** |
 | 5 | `edutap.image_api` client | `clients/image_api.py` |
 | 6 | HTTP API | upload, review, delivery, placeholder |
 | 7 | Events | `person.photo` producer |
 | 8 | Retention | `POST /maintenance/expire` |
 | 9 | Container and compose | `Dockerfile`, `compose.yml`, docs |
 
-Slices 1 and 2 are this pull request. They are together because a skeleton with no
-behaviour in it is not reviewable — there is nothing to disagree with.
+Slices 1 and 2 landed together, because a skeleton with no behaviour in it is not
+reviewable — there is nothing to disagree with. Slices 3 and 4 landed together for
+the opposite reason: the object store has no observable behaviour of its own until
+something records what it did, and slice 4 is what removed the temporary CI guard
+that slice 1 had to introduce.
 
 ## Slice 1 — skeleton
 
