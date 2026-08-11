@@ -1,0 +1,68 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Nothing here is locked: every requirement is a lower bound and the eduTAP
+  # references are pinned to an immutable ref. Everything from a public index still
+  # drifts, so a suite that passed on the last commit can fail with nothing changed
+  # here. Weekly, Monday morning UTC, on main only.
+  schedule:
+    - cron: "23 5 * * 1"
+# Every job installs into a uv virtual environment and calls the interpreter inside
+# it by path. Not `uv pip install --system`: the runner's system interpreter is
+# Debian's and marked EXTERNALLY-MANAGED, so uv refuses it, and for the matrix
+# entries there is no system interpreter at all. Not `uv run` either, for the reason
+# the Makefile gives.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv venv
+      - run: uv pip install -e ".[dev]"
+      - run: .venv/bin/python -m pytest -v
+  integration:
+    # The default run excludes these (addopts), so without this job the
+    # database-backed behaviour would never be exercised in CI.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - run: uv venv
+      - run: uv pip install -e ".[dev]"
+      # TEMPORARY, until slice 4 of the plan lands the repository and with it the
+      # first integration test. There are none yet -- the service so far is pure
+      # logic -- and pytest exits 5 on "no tests collected", which fails the job.
+      #
+      # Exit 5 is tolerated here and nothing else is, so a real failure still turns
+      # this red. The echo is deliberate: a tolerated skip that prints nothing is
+      # indistinguishable from a passing run, and this is exactly the kind of
+      # allowance that outlives its reason. Delete the whole guard with slice 4.
+      - run: |
+          .venv/bin/python -m pytest -m integration -v || status=$?
+          if [ "${status:-0}" -eq 5 ]; then
+            echo "::warning::No integration tests exist yet; tolerated until slice 4."
+            exit 0
+          fi
+          exit "${status:-0}"
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - run: uv venv
+      - run: uv pip install -e ".[dev]"
+      - run: .venv/bin/python -m ruff check src tests
+      - run: .venv/bin/python -m ruff format --check src tests
+      - run: .venv/bin/python -m ty check src
