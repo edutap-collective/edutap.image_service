@@ -22,8 +22,8 @@ API exists has to be corrected in two places.
 | 2 | State machine | `states.py` — pure, no I/O |
 | 3 | Object store | `objectstore.py` — key layout, put/get/purge — **done** |
 | 4 | Repository | `repository.py` — the two tables plus the `person_view` reference, in one transaction; the temporary exit-5 guard in the `integration` CI job is gone with it — **done** |
-| 5 | `edutap.image_api` client | `clients/image_api.py` |
-| 6 | HTTP API | upload, review, delivery, placeholder |
+| 5 | Ingest, `edutap.image_api` client, upload use case | `ingest.py`, `clients/image_api.py`, `manifest.py`, `service.py` — **done** |
+| 6 | HTTP API | upload, review, delivery, placeholder — the routers over `service.py` |
 | 7 | Events | `person.photo` producer |
 | 8 | Retention | `POST /maintenance/expire` |
 | 9 | Container and compose | `Dockerfile`, `compose.yml`, docs |
@@ -84,3 +84,24 @@ makes this module testable without a fixture.
   `edutap.data_models.vocabulary`, as the other contract vocabulary has. Declared
   here for now; moving them later is a rename, not a redesign.
 - Whether the actor string a caller hands over is enough for an audit.
+
+
+## What slice 5 added that the plan did not foresee
+
+**Sanitisation is ours, not the image API's.** `edutap.image_api` analyses and
+transforms; nothing there strips metadata or guards against a decompression bomb.
+Both have to happen before a file is forwarded anywhere, which is what `ingest.py`
+is, and it is why `pillow` joined the runtime dependencies.
+
+**`/crop/` has no format parameter and always answers PNG.** The design says format
+follows purpose — PNG where a mask needs alpha, JPEG where nothing does — and an
+unmasked portrait as PNG is roughly six times the bytes, per version, per person.
+Until the other service can emit a format, the manifest marks which renderings get
+re-encoded here. A format parameter in `edutap.image_api` is the clean fix and
+belongs in that repository.
+
+**An upload with no face is refused rather than queued.** It was not obvious from
+the design, which says every upload reaches a reviewer. But `crop_mode: null` means
+there is no picture to approve, so queueing it would fill the review list with
+entries nobody can act on. A photograph that merely *fails* a check is still
+queued — failing is what a reviewer is for.
