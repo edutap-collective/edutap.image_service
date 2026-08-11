@@ -30,6 +30,11 @@ dependencies = [
     # prefers it and warns whenever it has to fall back, and it is the house
     # standard for REST clients across these packages.
     "httpx2>=2.9",
+    # Decoding and re-encoding on the way in is what strips camera metadata, and
+    # the pixel-count guard is what stops a decompression bomb before a decoder
+    # allocates for it. edutap.image_api analyses and transforms; it does not
+    # sanitise, and it never sees a file that has not passed through here.
+    "pillow>=11",
     "pydantic>=2.8",
     "pydantic-settings>=2.4",
     # [asyncio] rather than bare sqlalchemy: the async engine needs greenlet, and
@@ -88,4 +93,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Tests document themselves through their names and their docstrings where the
 # reasoning is not obvious. `assert` is the point of a test, not a security finding.
-"tests/*" = ["D100", "D103", "S101"]
+# The class rules go with the function ones: a test double is named for what it
+# fakes, and requiring prose on `FakeStore.__init__` produces noise rather than
+# explanation.
+"tests/*" = ["D100", "D101", "D102", "D103", "D107", "S101"]
