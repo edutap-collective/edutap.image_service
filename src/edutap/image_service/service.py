@@ -12,6 +12,7 @@ that resolves to nothing.
 
 import io
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -19,8 +20,17 @@ from PIL import Image
 
 from .clients.image_api import ValidationReport
 from .ingest import Limits, rights_metadata, sanitise
-from .manifest import Manifest, Variant
+from .manifest import MANIFESTS, Manifest, Variant
 from .objectstore import raw_key, variant_key
+from .states import (
+    EvidenceKind,
+    IllegalTransition,
+    PhotoState,
+    approve,
+    purge,
+    reactivate,
+    reject,
+)
 
 
 class NoFaceToCrop(Exception):
@@ -52,7 +62,26 @@ class _ImageApi(Protocol):
 
 
 class _Store(Protocol):
+    """What this service needs from an object store, and nothing more.
+
+    Narrow on purpose: it is what a test double has to provide, and it is the list
+    somebody reads to know whether a different store could be put underneath.
+    """
+
     async def put(self, key: str, data: bytes, content_type: str) -> None: ...
+
+    async def get(self, key: str) -> bytes: ...
+
+    async def purge_version(self, person_uid: str, version: str) -> int: ...
+
+
+@dataclass(frozen=True)
+class Delivered:
+    """Bytes plus what they are, so a router does not have to guess a content type."""
+
+    data: bytes
+    content_type: str
+    is_placeholder: bool
 
 
 @dataclass(frozen=True)
@@ -75,6 +104,8 @@ class PhotoService:
         image_api: _ImageApi,
         manifest: Manifest,
         limits: Limits,
+        placeholder: bytes,
+        reactivation_max_age: timedelta,
     ) -> None:
         """Hold the collaborators; the caller owns the transaction the repository uses."""
         self._repository = repository
@@ -82,6 +113,8 @@ class PhotoService:
         self._image_api = image_api
         self._manifest = manifest
         self._limits = limits
+        self._placeholder = placeholder
+        self._reactivation_max_age = reactivation_max_age
 
     async def submit(
         self, *, person_uid: str, upload: bytes, actor: str, rights_declared: bool
@@ -123,6 +156,131 @@ class PhotoService:
         )
         return Submission(version=version, report=report, stored_objects=stored)
 
+    async def approve(
+        self, *, person_uid: str, version: str, evidence_kind: EvidenceKind, actor: str
+    ) -> None:
+        """Activate a version on a reviewer's decision."""
+        current = await self._require(person_uid, version)
+        outcome = approve(PhotoState(current["state"]), evidence_kind=evidence_kind)
+        await self._repository.apply(
+            person_uid=person_uid,
+            version=version,
+            outcome=outcome,
+            actor=actor,
+            action="approve",
+        )
+
+    async def reject(self, *, person_uid: str, version: str, actor: str, reason: str) -> None:
+        """Refuse a version awaiting review.
+
+        `notified_at` is deliberately **not** set here. The retention clock starts
+        when the person was told, and telling them is the worker's job on the event
+        this raises -- setting it now would start the clock on a message nobody has
+        sent yet.
+        """
+        current = await self._require(person_uid, version)
+        outcome = reject(PhotoState(current["state"]))
+        await self._repository.apply(
+            person_uid=person_uid,
+            version=version,
+            outcome=outcome,
+            actor=actor,
+            action="reject",
+            reason=reason,
+        )
+
+    async def reactivate(self, *, person_uid: str, version: str, actor: str, now: datetime) -> None:
+        """Let the person switch back to a version they kept.
+
+        How old the approval is comes from the trail. A version that was never
+        approved cannot be reactivated by its owner at all, and passing the epoch
+        rather than raising would silently send it back through review -- correct by
+        accident, and wrong the day the rule changes.
+        """
+        current = await self._require(person_uid, version)
+        reviewed_at = await self._repository.last_approval_at(person_uid, version)
+        if reviewed_at is None:
+            raise IllegalTransition("this version was never approved")
+        outcome = reactivate(
+            PhotoState(current["state"]),
+            reviewed_at=reviewed_at,
+            now=now,
+            max_age=self._reactivation_max_age,
+            evidence_kind=EvidenceKind(current["evidence_kind"])
+            if current["evidence_kind"]
+            else None,
+        )
+        await self._repository.apply(
+            person_uid=person_uid,
+            version=version,
+            outcome=outcome,
+            actor=actor,
+            action="reactivate",
+        )
+
+    async def purge(self, *, person_uid: str, version: str, actor: str) -> int:
+        """Clear the bytes of a version the person no longer wants.
+
+        The state machine is asked first, so a held or active version never reaches
+        the bucket. Objects go before the row is marked: the other order would leave
+        a row claiming its bytes are gone while they are still there, which is the
+        one inconsistency nothing later would notice.
+        """
+        current = await self._require(person_uid, version)
+        purge(PhotoState(current["state"]), legal_hold_since=current["legal_hold_since"])
+        deleted = await self._store.purge_version(person_uid, version)
+        await self._repository.mark_purged(
+            person_uid=person_uid, version=version, actor=actor, objects_deleted=deleted
+        )
+        return deleted
+
+    async def deliver_current(self, *, person_uid: str, recipe: str, variant: str) -> Delivered:
+        """Serve the active version, or the placeholder.
+
+        The one route with no token on it, because a wallet provider fetches this
+        URL without credentials long after a pass was issued. It therefore serves
+        exactly one thing: the active version. Never `pending`, never `rejected`,
+        never `raw`.
+        """
+        active = await self._repository.active_for(person_uid)
+        if active is None:
+            return Delivered(data=self._placeholder, content_type="image/png", is_placeholder=True)
+        key = variant_key(person_uid, active["version"], active["recipe"], variant)
+        return Delivered(
+            data=await self._store.get(key),
+            content_type=_content_type_for(recipe, variant),
+            is_placeholder=False,
+        )
+
+    async def deliver_version(
+        self, *, person_uid: str, version: str, recipe: str, variant: str
+    ) -> Delivered:
+        """Serve one specific version, for a review client.
+
+        This is the route `pending` is visible on -- a reviewer has to see what they
+        are deciding about. `raw` is still refused: it is the only object that is
+        never delivered to anybody, and a reviewer looks at the crop.
+        """
+        if variant == "raw":
+            raise NotDeliverable("the sanitised original is never served")
+        await self._require(person_uid, version)
+        key = variant_key(person_uid, version, recipe, variant)
+        return Delivered(
+            data=await self._store.get(key),
+            content_type=_content_type_for(recipe, variant),
+            is_placeholder=False,
+        )
+
+    async def list_versions(self, person_uid: str) -> list[dict[str, Any]]:
+        """Every version of one person, newest first, for a review client."""
+        return await self._repository.list_for(person_uid)
+
+    async def _require(self, person_uid: str, version: str) -> dict[str, Any]:
+        row = await self._repository.get(person_uid, version)
+        if row is None:
+            raise VersionNotFound(f"no version {version!r} for {person_uid!r}")
+        return row
+
     async def _store_version(self, person_uid: str, version: str, raw: bytes, crop: bytes) -> int:
         """Put the sanitised original and every rendering of the manifest."""
         await self._store.put(raw_key(person_uid, version), raw, "image/jpeg")
@@ -162,3 +320,31 @@ def _to_jpeg(png: bytes) -> bytes:
     image = Image.open(io.BytesIO(png)).convert("RGB")
     image.save(buffer, format="JPEG", quality=90, optimize=True)
     return buffer.getvalue()
+
+
+class VersionNotFound(Exception):
+    """No such version for this person."""
+
+
+class NotDeliverable(Exception):
+    """The version exists but must not be served on the route that asked.
+
+    Two cases, and they are not the same refusal: `raw` is never served to anybody,
+    and a version that is not active is never served on the public `current` route.
+    """
+
+
+def _content_type_for(recipe: str, variant: str) -> str:
+    """Return the media type a stored rendering is served as.
+
+    Read from the manifest the object was rendered with, falling back to PNG. The
+    fallback is the safe direction: a JPEG mislabelled as PNG still displays in
+    every browser and wallet, while a PNG with an alpha channel labelled as JPEG
+    loses its transparency in some of them.
+    """
+    known = MANIFESTS.get(recipe)
+    if known is not None:
+        for candidate in known.variants:
+            if candidate.name == variant:
+                return candidate.content_type
+    return "image/png"
