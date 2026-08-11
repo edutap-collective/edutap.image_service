@@ -21,7 +21,7 @@ API exists has to be corrected in two places.
 | 1 | Package skeleton and settings | tooling, CI, `settings.py` |
 | 2 | State machine | `states.py` — pure, no I/O |
 | 3 | Object store | `objectstore.py` — key layout, put/get/purge |
-| 4 | Repository | `repository.py` — the two tables plus the `person_view` reference, in one transaction |
+| 4 | Repository | `repository.py` — the two tables plus the `person_view` reference, in one transaction. **Also removes the temporary exit-5 guard in the `integration` CI job**, which exists only because no integration test does yet |
 | 5 | `edutap.image_api` client | `clients/image_api.py` |
 | 6 | HTTP API | upload, review, delivery, placeholder |
 | 7 | Events | `person.photo` producer |
