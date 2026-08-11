@@ -195,6 +195,22 @@ class PhotoRepository:
         )
         return [dict(row) for row in result.mappings()]
 
+    async def last_approval_at(self, person_uid: str, version: str) -> datetime | None:
+        """When this version was last approved, or nothing if it never was.
+
+        Read from the trail rather than kept as a column: the trail is the record,
+        and a second copy on the row would be one more thing that can disagree with
+        it. The reactivation rule asks how old an approval is, and this is where the
+        answer lives.
+        """
+        return await self._session.scalar(
+            sa.select(sa.func.max(REVIEW.c.occurred_at)).where(
+                REVIEW.c.person_uid == person_uid,
+                REVIEW.c.version == version,
+                REVIEW.c.action == "approve",
+            )
+        )
+
     async def active_for(self, person_uid: str) -> dict[str, Any] | None:
         """Return the one active version, or nothing."""
         result = await self._session.execute(

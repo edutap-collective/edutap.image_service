@@ -36,6 +36,11 @@ dependencies = [
     # sanitise, and it never sees a file that has not passed through here.
     "pillow>=11",
     "pydantic>=2.8",
+    # An upload arrives as multipart/form-data, and FastAPI raises at *import* time
+    # without this -- not on the first request. A deployment that forgot it would
+    # fail to start rather than fail a upload, which is the better of the two but
+    # only if the requirement is declared.
+    "python-multipart>=0.0.20",
     "pydantic-settings>=2.4",
     # [asyncio] rather than bare sqlalchemy: the async engine needs greenlet, and
     # SQLAlchemy leaves it to that extra rather than to the core requirement.
@@ -59,6 +64,10 @@ docs = ["myst-parser", "sphinx>=8"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/edutap"]
+# The placeholder is served by the one unauthenticated route, so a wheel without it
+# answers 500 for every person who has not uploaded anything -- which is all of them
+# on day one.
+artifacts = ["src/edutap/image_service/assets/*.png"]
 
 [tool.hatch.metadata]
 # Required by hatchling for the direct references (git URLs, not PyPI names) above.

@@ -72,6 +72,21 @@ class Settings(BaseSettings):
     is not one anybody else should adopt.
     """
 
+    service_tokens: dict[str, str] = {}
+    """Tokens this service accepts, keyed by the name of the calling service.
+
+    Keyed rather than a bare list so the review trail can record *which* service
+    acted, and so one of them can be rotated without invalidating the others. An
+    empty mapping refuses every authenticated route -- the safe direction for a
+    deployment where nobody set them.
+    """
+
+    max_upload_bytes: int = 10 * 1024 * 1024
+    """Refused before the file is opened, so a bomb never reaches a decoder."""
+
+    max_image_edge: int = 8000
+    """Refused before the pixels are loaded. The byte limit alone does not catch it."""
+
     placeholder_path: str = ""
     """Image served where a person has no active version.
 

@@ -7,6 +7,7 @@ protocols; those have their own tests.
 """
 
 import io
+from datetime import timedelta
 
 import pytest
 import sqlalchemy as sa
@@ -62,6 +63,8 @@ def build(session, image_api=None):
         image_api=api,
         manifest=DEFAULT,
         limits=Limits(max_bytes=5_000_000, max_edge=4096),
+        placeholder=b"placeholder-bytes",
+        reactivation_max_age=timedelta(days=180),
     )
     return service, store, api
 
