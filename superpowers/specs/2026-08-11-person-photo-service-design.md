@@ -142,14 +142,13 @@ the version: the person cannot delete it, the expiry run ignores it. Setting it
 is a reviewer's right; releasing it is reserved to a separate, narrower role.
 Both write a review entry.
 
-```{important}
-The deletion of the person removes held versions too, and the notification goes
-out when the hold is *set*, not when the deletion approaches. An operator should
-know the consequence: where a fraud case is followed by the person leaving the
-institution, the directory's deletion event can remove the evidence while the
-handover to a prosecutor is still in progress. Handing over has to happen when
-the hold is set.
-```
+> [!IMPORTANT]
+> The deletion of the person removes held versions too, and the notification goes
+> out when the hold is *set*, not when the deletion approaches. An operator should
+> know the consequence: where a fraud case is followed by the person leaving the
+> institution, the directory's deletion event can remove the evidence while the
+> handover to a prosecutor is still in progress. Handing over has to happen when
+> the hold is set.
 
 ## Storage layout
 
@@ -226,7 +225,7 @@ The reference other services read stays a real column, written by
 
 ```json
 {
-  "url": "https://…/<person_uid>/photo/current",
+  "url": "https://…/persons/<person_uid>/photo/current",
   "version": "0198f3…",
   "is_placeholder": false,
   "evidence_kind": "support_visual",
@@ -239,16 +238,15 @@ The reference other services read stays a real column, written by
 `version` alongside the `current` URL lets a pass builder record which version it
 embedded without a second call.
 
-```{note}
-An earlier draft made this column a view over `public.photo`. That is not
-buildable: `person_view` is a table a spooler upserts into, and a single column
-of a written table cannot become a view. The alternative — renaming the base
-table and laying a view over it — moves every writer to a new name for one
-derived column. Since both tables live in the same database, the service instead
-writes `public.photo` and `public.person_view.photo` in one transaction, which
-makes drift impossible. The person spooler already names its columns
-individually so as not to touch `photo`, which is exactly this arrangement.
-```
+> [!NOTE]
+> An earlier draft made this column a view over `public.photo`. That is not
+> buildable: `person_view` is a table a spooler upserts into, and a single column
+> of a written table cannot become a view. The alternative — renaming the base
+> table and laying a view over it — moves every writer to a new name for one
+> derived column. Since both tables live in the same database, the service instead
+> writes `public.photo` and `public.person_view.photo` in one transaction, which
+> makes drift impossible. The person spooler already names its columns
+> individually so as not to touch `photo`, which is exactly this arrangement.
 
 ## HTTP API
 
@@ -311,14 +309,13 @@ with a hard error.
 
 `IAP/low` does not occur: there is no activation without evidence.
 
-```{important}
-This value is a statement about the *photograph*, not about the person. A person
-proofed with an identity document at enrolment holds their assurance regardless
-of how their later photo was checked. Where a credential carries assurance, the
-value that goes out is the **minimum over every attribute delivered** — computed
-by whichever service issues the credential and knows both numbers. This service
-knows only the photograph's, and must not be read as reporting the person's.
-```
+> [!IMPORTANT]
+> This value is a statement about the *photograph*, not about the person. A person
+> proofed with an identity document at enrolment holds their assurance regardless
+> of how their later photo was checked. Where a credential carries assurance, the
+> value that goes out is the **minimum over every attribute delivered** — computed
+> by whichever service issues the credential and knows both numbers. This service
+> knows only the photograph's, and must not be read as reporting the person's.
 
 ## Events
 
