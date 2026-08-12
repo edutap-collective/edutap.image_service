@@ -5,7 +5,7 @@ maps the refusal it gets back onto a status code — the refusals themselves liv
 the state machine, where they can be tested without a server.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, status
@@ -219,3 +219,105 @@ async def _guarded(awaitable: Any) -> Any:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     except VersionNotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+
+
+class HoldRequest(BaseModel):
+    """Placing or lifting a legal hold."""
+
+    actor: str
+    reason: str | None = None
+
+
+class ExpiryRequest(BaseModel):
+    """A retention run, as a scheduler asks for it.
+
+    The deadline comes from the caller because it is the operator's policy, not this
+    package's opinion. `older_than_days` may be omitted, and then the service falls
+    back to its configured default -- a photo service that never forgets anything on
+    its own is not one anybody else should adopt.
+    """
+
+    actor: str = "scheduler"
+    older_than_days: int | None = None
+
+
+@router.post("/persons/{person_uid}/photos/{version}/notified")
+async def mark_notified(
+    request: Request, person_uid: str, version: str, actor: str, caller: Caller
+) -> Response:
+    """Record that the person was told, which starts the retention clock.
+
+    Called by whoever sent the message. The clock deliberately does not start at the
+    rejection: somebody away for three weeks would otherwise lose the photograph
+    before ever learning it was refused.
+    """
+    async with request.app.state.unit_of_work() as (session, service):
+        await _guarded(
+            service.mark_notified(person_uid=person_uid, version=version, when=datetime.now(tz=UTC))
+        )
+        await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/persons/{person_uid}/photos/{version}/hold")
+async def set_hold(
+    request: Request, person_uid: str, version: str, body: HoldRequest, caller: Caller
+) -> Response:
+    """Place a legal hold. Every deletion path but the person's own then skips it."""
+    if not body.reason:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "a hold needs a reason")
+    async with request.app.state.unit_of_work() as (session, service):
+        await _guarded(
+            service.set_hold(
+                person_uid=person_uid, version=version, actor=body.actor, reason=body.reason
+            )
+        )
+        await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/persons/{person_uid}/photos/{version}/hold")
+async def release_hold(
+    request: Request, person_uid: str, version: str, actor: str, caller: Caller
+) -> Response:
+    """Lift a legal hold.
+
+    A separate route rather than a flag on the one above, because it is a narrower
+    right: placing a hold is a reviewer's, lifting it is not. Which caller may reach
+    this is the deployment's decision and is enforced in front of the service.
+    """
+    async with request.app.state.unit_of_work() as (session, service):
+        await _guarded(service.release_hold(person_uid=person_uid, version=version, actor=actor))
+        await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/persons/{person_uid}/photos/reset")
+async def reset_to_placeholder(
+    request: Request, person_uid: str, actor: str, caller: Caller
+) -> Response:
+    """Withdraw the active photograph. The card falls back to the placeholder."""
+    async with request.app.state.unit_of_work() as (session, service):
+        changed = await service.reset_to_placeholder(person_uid=person_uid, actor=actor)
+        await session.commit()
+    if not changed:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "this person has no active photograph")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/maintenance/expire")
+async def expire(request: Request, body: ExpiryRequest, caller: Caller) -> dict[str, Any]:
+    """Run the retention pass and report what it did.
+
+    Idempotent, callable as often as a scheduler likes, and the response *is* the
+    record: "purged, six objects" is auditable, "purged" is not.
+    """
+    days = body.older_than_days
+    if days is None:
+        days = request.app.state.default_expiry_days
+    async with request.app.state.unit_of_work() as (session, service):
+        result = await service.expire(
+            older_than=timedelta(days=days), now=datetime.now(tz=UTC), actor=body.actor
+        )
+        await session.commit()
+    return result

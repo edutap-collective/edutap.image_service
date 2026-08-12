@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from ..clients.image_api import ImageApiClient
+from ..events import PhotoEvents
 from ..ingest import Limits
 from ..manifest import manifest
 from ..objectstore import ObjectStore
@@ -64,6 +65,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         placeholder = _placeholder_bytes(settings)
         chosen = manifest(settings.recipe)
 
+        events = None
+        producer = None
+        if settings.kafka_bootstrap_servers:
+            from aiokafka import AIOKafkaProducer
+
+            producer = AIOKafkaProducer(bootstrap_servers=settings.kafka_bootstrap_servers)
+            await producer.start()
+            events = PhotoEvents(
+                producer=producer,
+                topic_prefix=settings.kafka_topic_prefix,
+                producer_version=settings.producer_version,
+            )
+
         @asynccontextmanager
         async def unit_of_work() -> AsyncIterator[tuple[AsyncSession, PhotoService]]:
             async with AsyncSession(engine, expire_on_commit=False) as session:
@@ -80,14 +94,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         ),
                         placeholder=placeholder,
                         reactivation_max_age=settings.reactivation_max_age,
+                        events=events,
                     ),
                 )
 
         app.state.unit_of_work = unit_of_work
         app.state.service_tokens = settings.service_tokens
+        app.state.default_expiry_days = settings.default_expiry_days
         try:
             yield
         finally:
+            if producer is not None:
+                await producer.stop()
             await http.aclose()
             await engine.dispose()
 

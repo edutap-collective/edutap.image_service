@@ -12,6 +12,11 @@ license = "EUPL-1.2"
 authors = [{ name = "eduTAP" }]
 dependencies = [
     "aioboto3>=13",
+    # The producer for `person.photo`. Publishing is optional at runtime -- an empty
+    # bootstrap setting disables it -- but the import is not, and making the package
+    # an extra would mean the one configuration that tells anybody about a decision
+    # is the one nobody installs.
+    "aiokafka>=0.11",
     "asyncpg>=0.29",
     # PEP 508 direct references: public but not published to a public index, pinned
     # to an immutable ref rather than to a branch. The two photo tables this service

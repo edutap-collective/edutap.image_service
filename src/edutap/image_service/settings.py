@@ -29,6 +29,24 @@ class Settings(BaseSettings):
     image_api_timeout: float = 30.0
 
     kafka_topic_prefix: str = "edutap.dev"
+    """`edutap.<environment>`; this service appends `.person.photo` itself.
+
+    One variable rather than a topic name, as the target schema settled on: the
+    package knows the business part of the name and the deployment knows which
+    environment it is.
+    """
+
+    kafka_bootstrap_servers: str = ""
+    """Empty disables publishing entirely.
+
+    Deliberate, and the safe direction for a developer running the service without a
+    broker: decisions still work and are recorded, only nobody is told about them.
+    A deployment that leaves this empty gets a service whose mails never go out --
+    which is why it is the first thing the deployment documentation names.
+    """
+
+    producer_version: str = ""
+    """Image tag, carried in `edutap-producer-version`. Optional by the schema."""
 
     public_origin: str = "http://localhost:8000"
     """External origin of this service.

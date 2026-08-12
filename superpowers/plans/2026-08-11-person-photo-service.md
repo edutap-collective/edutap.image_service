@@ -24,8 +24,8 @@ API exists has to be corrected in two places.
 | 4 | Repository | `repository.py` — the two tables plus the `person_view` reference, in one transaction; the temporary exit-5 guard in the `integration` CI job is gone with it — **done** |
 | 5 | Ingest, `edutap.image_api` client, upload use case | `ingest.py`, `clients/image_api.py`, `manifest.py`, `service.py` — **done** |
 | 6 | HTTP API | upload, review, delivery, placeholder — the routers over `service.py` — **done** |
-| 7 | Events | `person.photo` producer |
-| 8 | Retention | `POST /maintenance/expire` |
+| 7 | Events | `person.photo` producer — **done** |
+| 8 | Retention | `POST /maintenance/expire` — **done** |
 | 9 | Container and compose | `Dockerfile`, `compose.yml`, docs |
 
 Slices 1 and 2 landed together, because a skeleton with no behaviour in it is not
@@ -130,3 +130,27 @@ Still open before this is deployable: the events of slice 7, the retention endpo
 of slice 8, and the container of slice 9. `ObjectStore` still has no test against a
 live bucket — that belongs with slice 9, where a MinIO or RustFS container joins the
 integration job.
+
+
+## What slices 7 and 8 settled
+
+**They belong together, and the reason is a loop.** The retention clock runs from
+`notified_at`, and the notification is a mail the worker sends on the rejection
+event. Built apart, slice 8 would have had a clock nothing ever started. The
+feedback route (`POST …/notified`) is what closes it, and it is called by whoever
+sent the message rather than by whoever made the decision.
+
+**Events are published before the transaction commits.** Neither order is safe and
+this is the lesser evil, following the arrangement the VZD spooler already uses in
+this codebase. Publishing first means a commit that then fails leaves an event
+describing something that did not happen — rare, and largely self-correcting,
+because a consumer that rebuilds a pass reads the state that actually exists.
+Committing first means a publish that fails leaves a decision nobody is ever told
+about: no mail, and an Apple pass that keeps the old photograph for good. Silence is
+the worse failure. A transactional outbox removes the choice and is the right fix
+once anything here needs more than one event per request.
+
+**An empty `kafka_bootstrap_servers` disables publishing entirely.** Deliberate, so
+a developer can run the service without a broker — and the first thing the
+deployment documentation has to name, because a production deployment that leaves it
+empty gets a service whose mails never go out.

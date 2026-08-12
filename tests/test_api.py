@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from edutap.image_service.api.routers import public, router
 from edutap.image_service.clients.image_api import ValidationReport
+from edutap.image_service.events import PhotoEvents
 from edutap.image_service.ingest import Limits
 from edutap.image_service.manifest import DEFAULT
 from edutap.image_service.repository import PhotoRepository
@@ -56,6 +57,14 @@ class FakeStore:
         return len(gone)
 
 
+class FakeProducer:
+    def __init__(self):
+        self.sent = []
+
+    async def send_and_wait(self, topic, value, key=None, headers=None):
+        self.sent.append({"topic": topic, "value": value, "headers": dict(headers or [])})
+
+
 class FakeImageApi:
     def __init__(self, report=None):
         self.report = report or ValidationReport(passed=True, crop_mode="face", crop=_png())
@@ -78,6 +87,8 @@ def client(postgres_dsn, request):
     """
     store = FakeStore()
     image_api = getattr(request, "param", None) or FakeImageApi()
+    producer = FakeProducer()
+    events = PhotoEvents(producer=producer, topic_prefix="edutap.test")
 
     @asynccontextmanager
     async def lifespan(app):
@@ -99,11 +110,13 @@ def client(postgres_dsn, request):
                         limits=Limits(max_bytes=5_000_000, max_edge=4096),
                         placeholder=PLACEHOLDER,
                         reactivation_max_age=timedelta(days=180),
+                        events=events,
                     ),
                 )
 
         app.state.unit_of_work = unit_of_work
         app.state.service_tokens = {"backend": TOKEN}
+        app.state.default_expiry_days = 14
         yield
         await engine.dispose()
 
@@ -112,6 +125,7 @@ def client(postgres_dsn, request):
     app.include_router(public)
     with TestClient(app) as test_client:
         test_client.store = store
+        test_client.events = producer
         yield test_client
 
 
@@ -266,3 +280,91 @@ def test_an_unknown_version_is_a_404(client):
         headers=AUTH,
     )
     assert response.status_code == 404
+
+
+def test_a_rejected_version_only_expires_once_the_person_was_told(client):
+    """The clock starts at the notification, not at the rejection.
+
+    Two runs with the same deadline: the first finds nothing because nobody has been
+    told yet, the second finds it. That gap is the whole point -- somebody away for
+    three weeks would otherwise lose the photograph before learning it was refused.
+    """
+    version = _upload(client).json()["version"]
+    client.post(
+        f"/persons/{UID}/photos/{version}/reject",
+        json={"actor": "support:kb12", "reason": "too dark"},
+        headers=AUTH,
+    )
+
+    first = client.post("/maintenance/expire", json={"older_than_days": 0}, headers=AUTH)
+    assert first.json()["purged"] == []
+
+    client.post(f"/persons/{UID}/photos/{version}/notified?actor=worker", headers=AUTH)
+    second = client.post("/maintenance/expire", json={"older_than_days": 0}, headers=AUTH)
+    assert [row["version"] for row in second.json()["purged"]] == [version]
+    assert not [key for key in client.store.objects if f"/{version}/" in key]
+
+
+def test_a_held_version_survives_the_retention_run(client):
+    """Every deletion path but the person's own consults the hold."""
+    version = _upload(client).json()["version"]
+    client.post(
+        f"/persons/{UID}/photos/{version}/reject",
+        json={"actor": "support:kb12", "reason": "too dark"},
+        headers=AUTH,
+    )
+    client.post(f"/persons/{UID}/photos/{version}/notified?actor=worker", headers=AUTH)
+    client.post(
+        f"/persons/{UID}/photos/{version}/hold",
+        json={"actor": "support:kb12", "reason": "not this person"},
+        headers=AUTH,
+    )
+
+    result = client.post("/maintenance/expire", json={"older_than_days": 0}, headers=AUTH)
+    assert result.json()["purged"] == []
+    assert [key for key in client.store.objects if f"/{version}/" in key]
+
+
+def test_a_hold_without_a_reason_is_refused(client):
+    """The reason is the whole value of the record when somebody asks about it later."""
+    version = _upload(client).json()["version"]
+    response = client.post(
+        f"/persons/{UID}/photos/{version}/hold", json={"actor": "support"}, headers=AUTH
+    )
+    assert response.status_code == 400
+
+
+def test_resetting_withdraws_the_photograph_and_the_placeholder_returns(client):
+    version = _upload(client).json()["version"]
+    client.post(
+        f"/persons/{UID}/photos/{version}/approve",
+        json={"actor": "support:kb12", "evidence_kind": EvidenceKind.SUPPORT_VISUAL},
+        headers=AUTH,
+    )
+    assert client.get(f"/persons/{UID}/photo/current/default/square-512").content != PLACEHOLDER
+
+    reset = client.post(f"/persons/{UID}/photos/reset?actor=support:kb12", headers=AUTH)
+    assert reset.status_code == 204
+
+    after = client.get(f"/persons/{UID}/photo/current/default/square-512")
+    assert after.content == PLACEHOLDER
+    listed = client.get(f"/persons/{UID}/photos", headers=AUTH).json()
+    assert listed[0]["state"] == PhotoState.SUPERSEDED
+
+
+def test_resetting_a_person_who_has_no_photograph_is_a_404(client):
+    assert client.post(f"/persons/{UID}/photos/reset?actor=x", headers=AUTH).status_code == 404
+
+
+def test_the_decisions_are_published_as_facts(client):
+    """One event per decision, keyed by the person, with the schema a consumer pins."""
+    version = _upload(client).json()["version"]
+    client.post(
+        f"/persons/{UID}/photos/{version}/approve",
+        json={"actor": "support:kb12", "evidence_kind": EvidenceKind.SUPPORT_VISUAL},
+        headers=AUTH,
+    )
+    client.post(f"/persons/{UID}/photos/reset?actor=support:kb12", headers=AUTH)
+
+    actions = [event["headers"]["edutap-action"] for event in client.events.sent]
+    assert actions == [b"activated", b"withdrawn"]

@@ -19,12 +19,16 @@ from uuid import uuid4
 from PIL import Image
 
 from .clients.image_api import ValidationReport
+from .events import PhotoEvent, activated, held, withdrawn
+from .events import rejected as rejected_event
 from .ingest import Limits, rights_metadata, sanitise
 from .manifest import MANIFESTS, Manifest, Variant
 from .objectstore import raw_key, variant_key
+from .reference import PHOTO_ASSURANCE
 from .states import (
     EvidenceKind,
     IllegalTransition,
+    Outcome,
     PhotoState,
     approve,
     purge,
@@ -106,6 +110,7 @@ class PhotoService:
         limits: Limits,
         placeholder: bytes,
         reactivation_max_age: timedelta,
+        events: Any = None,
     ) -> None:
         """Hold the collaborators; the caller owns the transaction the repository uses."""
         self._repository = repository
@@ -115,6 +120,7 @@ class PhotoService:
         self._limits = limits
         self._placeholder = placeholder
         self._reactivation_max_age = reactivation_max_age
+        self._events = events
 
     async def submit(
         self, *, person_uid: str, upload: bytes, actor: str, rights_declared: bool
@@ -169,6 +175,14 @@ class PhotoService:
             actor=actor,
             action="approve",
         )
+        await self._publish(
+            activated(
+                person_uid,
+                version,
+                evidence_kind=str(evidence_kind),
+                assurance=PHOTO_ASSURANCE[evidence_kind],
+            )
+        )
 
     async def reject(self, *, person_uid: str, version: str, actor: str, reason: str) -> None:
         """Refuse a version awaiting review.
@@ -188,6 +202,7 @@ class PhotoService:
             action="reject",
             reason=reason,
         )
+        await self._publish(rejected_event(person_uid, version, reason=reason))
 
     async def reactivate(self, *, person_uid: str, version: str, actor: str, now: datetime) -> None:
         """Let the person switch back to a version they kept.
@@ -274,6 +289,101 @@ class PhotoService:
     async def list_versions(self, person_uid: str) -> list[dict[str, Any]]:
         """Every version of one person, newest first, for a review client."""
         return await self._repository.list_for(person_uid)
+
+    async def mark_notified(self, *, person_uid: str, version: str, when: datetime) -> None:
+        """Record that the person was told about a decision.
+
+        Called by whoever sent the message. This is the feedback loop that starts the
+        retention clock, and it is why the clock is not started at the rejection: the
+        service that refuses a photograph does not send the mail.
+        """
+        await self._require(person_uid, version)
+        await self._repository.mark_notified(person_uid=person_uid, version=version, when=when)
+
+    async def set_hold(self, *, person_uid: str, version: str, actor: str, reason: str) -> None:
+        """Place a legal hold and say so immediately.
+
+        The event is not a nicety. Deleting the person removes held versions too, so
+        a handover to whoever needs the evidence has to happen while the person is
+        still on file -- and nobody watches this table.
+        """
+        await self._require(person_uid, version)
+        await self._repository.set_legal_hold(
+            person_uid=person_uid, version=version, actor=actor, reason=reason
+        )
+        await self._publish(held(person_uid, version, reason=reason, by=actor))
+
+    async def release_hold(self, *, person_uid: str, version: str, actor: str) -> None:
+        """Lift a legal hold. A narrower right than placing one, enforced by the caller."""
+        await self._require(person_uid, version)
+        await self._repository.release_legal_hold(
+            person_uid=person_uid, version=version, actor=actor
+        )
+
+    async def reset_to_placeholder(self, *, person_uid: str, actor: str) -> bool:
+        """Withdraw the active photograph without deleting it.
+
+        The version becomes `superseded` rather than disappearing: the person may
+        still switch back to it, and the review trail keeps saying what was once on
+        the card.
+        """
+        active = await self._repository.active_for(person_uid)
+        if active is None:
+            return False
+        await self._repository.apply(
+            person_uid=person_uid,
+            version=active["version"],
+            outcome=Outcome(PhotoState.SUPERSEDED),
+            actor=actor,
+            action="reset",
+        )
+        await self._publish(withdrawn(person_uid))
+        return True
+
+    async def expire(self, *, older_than: timedelta, now: datetime, actor: str) -> dict[str, Any]:
+        """Clear the bytes of rejected versions past their deadline.
+
+        Driven from outside: this service has no clock, and the deadline is the
+        operator's policy rather than this package's opinion. The response is the
+        record of what happened, which is what makes the run auditable without a log
+        search.
+        """
+        due = await self._repository.due_for_expiry(older_than=older_than, now=now)
+        purged = []
+        for row in due:
+            deleted = await self._store.purge_version(row["person_uid"], row["version"])
+            await self._repository.mark_purged(
+                person_uid=row["person_uid"],
+                version=row["version"],
+                actor=actor,
+                objects_deleted=deleted,
+            )
+            purged.append(
+                {
+                    "person_uid": row["person_uid"],
+                    "version": row["version"],
+                    "objects_deleted": deleted,
+                }
+            )
+        return {"purged": purged}
+
+    async def _publish(self, event: PhotoEvent) -> None:
+        """Send a fact, before the caller commits.
+
+        The order is the one this codebase already uses for a dual write, and it is
+        the lesser of two unsafe options. Publishing first means a commit that fails
+        afterwards leaves an event describing something that did not happen -- rare,
+        and largely self-correcting, because a consumer that rebuilds a pass will
+        read the state that actually exists. Committing first means a publish that
+        fails leaves a decision nobody is ever told about: no mail, and an Apple pass
+        that keeps the old photograph for good. Silence is the worse failure.
+
+        A transactional outbox would remove the choice, and is the right fix once
+        anything here needs more than one event per request.
+        """
+        if self._events is None:
+            return
+        await self._events.publish(event)
 
     async def _require(self, person_uid: str, version: str) -> dict[str, Any]:
         row = await self._repository.get(person_uid, version)
