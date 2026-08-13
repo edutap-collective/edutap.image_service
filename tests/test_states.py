@@ -16,6 +16,7 @@ from edutap.image_service.states import (
     PhotoState,
     UnderLegalHold,
     approve,
+    confirm,
     purge,
     reactivate,
     reject,
@@ -157,3 +158,52 @@ def test_the_hold_is_checked_before_the_state():
     """
     with pytest.raises(UnderLegalHold):
         purge(PhotoState.ACTIVE, legal_hold_since=NOW)
+
+
+def test_confirming_a_candidate_queues_it_for_review():
+    outcome = confirm(PhotoState.DRAFT)
+    assert outcome.new_state is PhotoState.PENDING
+    assert outcome.supersede_active is False
+    assert outcome.evidence_kind is None
+
+
+@pytest.mark.parametrize(
+    "state",
+    [PhotoState.PENDING, PhotoState.ACTIVE, PhotoState.REJECTED, PhotoState.SUPERSEDED],
+)
+def test_only_a_candidate_can_be_confirmed(state):
+    with pytest.raises(IllegalTransition):
+        confirm(state)
+
+
+def test_a_candidate_cannot_be_approved():
+    """A reviewer never sees a candidate; reaching them is what confirming is for."""
+    with pytest.raises(IllegalTransition):
+        approve(PhotoState.DRAFT, evidence_kind=EvidenceKind.SUPPORT_VISUAL)
+
+
+def test_a_candidate_cannot_be_rejected():
+    with pytest.raises(IllegalTransition):
+        reject(PhotoState.DRAFT)
+
+
+def test_a_candidate_cannot_be_reactivated():
+    with pytest.raises(IllegalTransition):
+        reactivate(
+            PhotoState.DRAFT,
+            reviewed_at=NOW,
+            now=NOW,
+            max_age=SIX_MONTHS,
+            evidence_kind=EvidenceKind.SUPPORT_VISUAL,
+        )
+
+
+def test_a_candidate_may_be_purged():
+    """Discarding what one just uploaded must not need a reviewer."""
+    assert purge(PhotoState.DRAFT, legal_hold_since=None) is None
+
+
+def test_a_held_candidate_is_not_purgeable_either():
+    """A hold can strike any state -- a reviewer may recognise a stranger's face."""
+    with pytest.raises(UnderLegalHold):
+        purge(PhotoState.DRAFT, legal_hold_since=NOW)
