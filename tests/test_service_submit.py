@@ -40,6 +40,13 @@ class FakeStore:
     async def put(self, key, data, content_type):
         self.objects[key] = (data, content_type)
 
+    async def purge_version(self, person_uid, version):
+        prefix = f"{person_uid}/photo/{version}/"
+        gone = [key for key in self.objects if key.startswith(prefix)]
+        for key in gone:
+            del self.objects[key]
+        return len(gone)
+
 
 class FakeImageApi:
     def __init__(self, *, report=None):
@@ -71,7 +78,7 @@ def build(session, image_api=None):
 
 async def test_a_submission_stores_the_raw_and_every_variant_of_the_manifest(session):
     service, store, _ = build(session)
-    result = await service.submit(person_uid=UID, upload=_png(), actor="self", rights_declared=True)
+    result = await service.submit(person_uid=UID, upload=_png())
     await session.commit()
 
     keys = sorted(store.objects)
@@ -84,7 +91,7 @@ async def test_a_submission_stores_the_raw_and_every_variant_of_the_manifest(ses
 async def test_the_unmasked_variants_are_stored_as_jpeg_and_the_masked_one_as_png(session):
     """The mask needs an alpha channel; the portrait does not, and pays for it in bytes."""
     service, store, _ = build(session)
-    result = await service.submit(person_uid=UID, upload=_png(), actor="self", rights_declared=True)
+    result = await service.submit(person_uid=UID, upload=_png())
     await session.commit()
 
     types = {
@@ -99,19 +106,38 @@ async def test_the_unmasked_variants_are_stored_as_jpeg_and_the_masked_one_as_pn
     }
 
 
-async def test_the_row_lands_pending_with_the_validation_in_its_trail(session):
+async def test_the_row_lands_as_a_candidate_with_the_validation_waiting_on_it(session):
+    """The verdict is produced now and belongs in a trail entry written later.
+
+    It waits on the row rather than in memory, because the request that produced it
+    and the request that records it are different requests.
+    """
     service, _, _ = build(session)
-    await service.submit(person_uid=UID, upload=_png(), actor="self", rights_declared=True)
+    await service.submit(person_uid=UID, upload=_png())
     await session.commit()
 
     row = (await session.execute(sa.select(PHOTO))).mappings().one()
-    assert row["state"] == "pending"
+    assert row["state"] == "draft"
     assert row["recipe"] == "default"
+    assert row["draft_details"]["validation"]["passed"] is True
+    assert "dimensions" in row["draft_details"]
 
-    entry = (await session.execute(sa.select(REVIEW))).mappings().one()
-    assert entry["action"] == "submit"
-    assert entry["details"]["validation"]["passed"] is True
-    assert entry["sha256"] == row["sha256"]
+    count = (await session.execute(sa.select(sa.func.count()).select_from(REVIEW))).scalar()
+    assert count == 0
+
+
+async def test_a_second_upload_replaces_the_first_candidate(session):
+    """At most one candidate per person. The service clears, the index guarantees."""
+    service, store, _ = build(session)
+    first = await service.submit(person_uid=UID, upload=_png())
+    await session.commit()
+
+    second = await service.submit(person_uid=UID, upload=_png())
+    await session.commit()
+
+    rows = (await session.execute(sa.select(PHOTO))).mappings().all()
+    assert [row["version"] for row in rows] == [second.version]
+    assert not any(key.startswith(f"{UID}/photo/{first.version}/") for key in store.objects)
 
 
 async def test_a_photograph_that_fails_a_hard_check_is_still_queued(session):
@@ -126,11 +152,11 @@ async def test_a_photograph_that_fails_a_hard_check_is_still_queued(session):
         )
     )
     service, _, _ = build(session, image_api=api)
-    result = await service.submit(person_uid=UID, upload=_png(), actor="self", rights_declared=True)
+    result = await service.submit(person_uid=UID, upload=_png())
     await session.commit()
 
     assert not result.report.passed
-    assert (await session.execute(sa.select(PHOTO.c.state))).scalar() == "pending"
+    assert (await session.execute(sa.select(PHOTO.c.state))).scalar() == "draft"
 
 
 async def test_an_image_without_a_face_stores_nothing_at_all(session):
@@ -143,27 +169,28 @@ async def test_an_image_without_a_face_stores_nothing_at_all(session):
     service, store, _ = build(session, image_api=api)
 
     with pytest.raises(NoFaceToCrop):
-        await service.submit(person_uid=UID, upload=_png(), actor="self", rights_declared=True)
+        await service.submit(person_uid=UID, upload=_png())
     await session.commit()
 
     assert store.objects == {}
     assert (await session.execute(sa.select(sa.func.count()).select_from(PHOTO))).scalar() == 0
 
 
-async def test_a_submission_without_the_rights_declaration_is_refused(session):
-    """The declaration carries the legal weight, so it is not defaulted."""
-    service, store, _ = build(session)
-    with pytest.raises(ValueError):
-        await service.submit(person_uid=UID, upload=_png(), actor="self", rights_declared=False)
-    assert store.objects == {}
+async def test_an_upload_needs_no_rights_declaration(session):
+    """It is made at confirmation. Demanding it here would collect it twice.
+
+    The refusal itself has not gone away -- it moved to `test_service_confirm.py`,
+    which is where the declaration is now made.
+    """
+    service, _, _ = build(session)
+    result = await service.submit(person_uid=UID, upload=_png())
+    assert result.version
 
 
 async def test_an_unusable_file_never_reaches_the_image_api(session):
     """Sanitising comes first so a bomb is not forwarded to the other service."""
     service, store, api = build(session)
     with pytest.raises(UnsupportedFormat):
-        await service.submit(
-            person_uid=UID, upload=b"not an image", actor="self", rights_declared=True
-        )
+        await service.submit(person_uid=UID, upload=b"not an image")
     assert api.crops == []
     assert store.objects == {}

@@ -115,20 +115,84 @@ def client(postgres_dsn, request):
         yield test_client
 
 
-def _upload(client, **overrides):
-    data = {"actor": "self", "rights_declared": "true"} | overrides
+def _upload(client):
+    """Post a file. What comes back is a candidate -- nobody has been asked yet."""
     return client.post(
         f"/persons/{UID}/photos",
         files={"file": ("portrait.png", _png(), "image/png")},
-        data=data,
         headers=AUTH,
     )
 
 
-def test_an_upload_is_accepted_and_comes_back_pending(client):
+def _submit(client, **overrides):
+    """Upload and confirm, and return the version.
+
+    The two steps a person actually takes, for the tests that need a version
+    somebody has stood behind -- everything a reviewer touches.
+    """
+    version = _upload(client).json()["version"]
+    body = {"actor": "user:ab12cde@lmu.de", "rights_declared": True} | overrides
+    client.post(f"/persons/{UID}/photos/{version}/confirm", json=body, headers=AUTH)
+    return version
+
+
+def test_an_upload_comes_back_as_a_candidate(client):
+    """An upload answers with a candidate.
+
+    `draft`, not `pending`: nobody has been asked to look at it yet, and a front end
+    that said "in review" here would be lying by one step.
+    """
     response = _upload(client)
     assert response.status_code == 201
-    assert response.json()["state"] == "pending"
+    assert response.json()["state"] == "draft"
+
+
+def test_confirming_queues_the_candidate(client):
+    version = _upload(client).json()["version"]
+
+    response = client.post(
+        f"/persons/{UID}/photos/{version}/confirm",
+        json={"actor": "user:ab12cde@lmu.de", "rights_declared": True},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 204
+    listed = client.get(f"/persons/{UID}/photos", headers=AUTH).json()
+    assert [row["state"] for row in listed] == ["pending"]
+
+
+def test_confirming_without_the_declaration_is_a_bad_request(client):
+    version = _upload(client).json()["version"]
+
+    response = client.post(
+        f"/persons/{UID}/photos/{version}/confirm",
+        json={"actor": "user:ab12cde@lmu.de", "rights_declared": False},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 400
+
+
+def test_confirming_an_unknown_version_is_a_404(client):
+    """A person confirms what they saw, so the version travels in the path."""
+    _upload(client)
+
+    response = client.post(
+        f"/persons/{UID}/photos/some-other-version/confirm",
+        json={"actor": "self", "rights_declared": True},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 404
+
+
+def test_confirming_needs_a_token(client):
+    response = client.post(
+        f"/persons/{UID}/photos/whatever/confirm",
+        json={"actor": "self", "rights_declared": True},
+    )
+
+    assert response.status_code == 401
 
 
 def test_every_authenticated_route_refuses_without_a_token(client):
@@ -161,7 +225,7 @@ def test_a_person_without_a_photograph_gets_the_placeholder_not_a_404(client):
 
 
 def test_the_current_route_serves_the_active_version_once_there_is_one(client):
-    version = _upload(client).json()["version"]
+    version = _submit(client)
     approved = client.post(
         f"/persons/{UID}/photos/{version}/approve",
         json={"actor": "support:kb12", "evidence_kind": EvidenceKind.SUPPORT_VISUAL},
@@ -186,7 +250,7 @@ def test_a_pending_version_never_reaches_the_current_route(client):
 
 
 def test_a_pending_version_is_visible_on_the_review_route(client):
-    version = _upload(client).json()["version"]
+    version = _submit(client)
     response = client.get(f"/persons/{UID}/photos/{version}/default/square-512", headers=AUTH)
     assert response.status_code == 200
     assert response.content != PLACEHOLDER
@@ -194,14 +258,14 @@ def test_a_pending_version_is_visible_on_the_review_route(client):
 
 def test_the_sanitised_original_is_never_served(client):
     """The one object nobody gets, reviewer included -- they look at the crop."""
-    version = _upload(client).json()["version"]
+    version = _submit(client)
     response = client.get(f"/persons/{UID}/photos/{version}/default/raw", headers=AUTH)
     assert response.status_code == 403
 
 
 def test_approval_without_an_evidence_kind_is_refused(client):
     """There is no default. A default would record that somebody looked who did not."""
-    version = _upload(client).json()["version"]
+    version = _submit(client)
     response = client.post(
         f"/persons/{UID}/photos/{version}/approve", json={"actor": "support"}, headers=AUTH
     )
@@ -210,7 +274,7 @@ def test_approval_without_an_evidence_kind_is_refused(client):
 
 def test_rejecting_without_a_reason_is_refused(client):
     """The reason goes into the trail and into what the person is told."""
-    version = _upload(client).json()["version"]
+    version = _submit(client)
     response = client.post(
         f"/persons/{UID}/photos/{version}/reject", json={"actor": "support"}, headers=AUTH
     )
@@ -218,7 +282,7 @@ def test_rejecting_without_a_reason_is_refused(client):
 
 
 def test_an_illegal_transition_is_a_conflict(client):
-    version = _upload(client).json()["version"]
+    version = _submit(client)
     body = {"actor": "support:kb12", "evidence_kind": EvidenceKind.SUPPORT_VISUAL}
     client.post(f"/persons/{UID}/photos/{version}/approve", json=body, headers=AUTH)
     again = client.post(f"/persons/{UID}/photos/{version}/approve", json=body, headers=AUTH)
@@ -232,7 +296,7 @@ def test_deleting_the_active_version_is_a_conflict_and_a_held_one_is_locked(clie
     "this is evidence in a proceeding" for the second. Making both 409 would force
     it to parse the message to tell them apart.
     """
-    version = _upload(client).json()["version"]
+    version = _submit(client)
     client.post(
         f"/persons/{UID}/photos/{version}/approve",
         json={"actor": "support:kb12", "evidence_kind": EvidenceKind.SUPPORT_VISUAL},
@@ -243,10 +307,10 @@ def test_deleting_the_active_version_is_a_conflict_and_a_held_one_is_locked(clie
 
 
 def test_purging_a_superseded_version_clears_its_objects(client):
-    first = _upload(client).json()["version"]
+    first = _submit(client)
     body = {"actor": "support:kb12", "evidence_kind": EvidenceKind.SUPPORT_VISUAL}
     client.post(f"/persons/{UID}/photos/{first}/approve", json=body, headers=AUTH)
-    second = _upload(client).json()["version"]
+    second = _submit(client)
     client.post(f"/persons/{UID}/photos/{second}/approve", json=body, headers=AUTH)
 
     response = client.delete(f"/persons/{UID}/photos/{first}?actor=self", headers=AUTH)
