@@ -22,6 +22,20 @@ public = APIRouter()
 
 Caller = Annotated[str, Depends(require_service_token)]
 
+#: The accepted upload formats as media types. `ingest.ACCEPTED_FORMATS` holds
+#: Pillow's format names, which are the right thing for a decoder and the wrong
+#: thing for a browser's `accept` attribute. MPO is a multi-picture JPEG and has no
+#: media type of its own.
+ACCEPTED_MEDIA_TYPES = ["image/jpeg", "image/png", "image/heic", "image/heif"]
+
+
+class ServiceLimits(BaseModel):
+    """What this service accepts, so a front end can say so before uploading."""
+
+    max_file_bytes: int
+    max_image_edge: int
+    accepted_formats: list[str]
+
 
 class SubmissionAccepted(BaseModel):
     """What a front end tells the person who just uploaded.
@@ -219,6 +233,27 @@ async def deliver_version(
         except VersionNotFound as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     return Response(content=delivered.data, media_type=delivered.content_type)
+
+
+@public.get("/limits")
+async def limits(request: Request) -> ServiceLimits:
+    """Report the acceptance limits this deployment enforces.
+
+    Tokenless, like the `current` route and for a related reason: the caller is a
+    browser about to upload and holds no service token. Nothing in the answer is
+    about a person -- it is a property of the deployment, and anyone could discover
+    the same numbers by uploading something too large.
+
+    Read from the very `Limits` object the ingest check uses. A second copy of these
+    numbers anywhere drifts, and then a front end refuses what this service would
+    have taken.
+    """
+    enforced = request.app.state.limits
+    return ServiceLimits(
+        max_file_bytes=enforced.max_bytes,
+        max_image_edge=enforced.max_edge,
+        accepted_formats=ACCEPTED_MEDIA_TYPES,
+    )
 
 
 @public.get("/persons/{person_uid}/photo/current/{recipe}/{variant}")
