@@ -1,0 +1,82 @@
+name: Publish container image
+
+# Publishes the service image to the GitHub Container Registry.
+#
+# A long-running service, unlike the migration image of edutap.db_definitions:
+# it is started and stays up, so what matters here is that a deployment can pin
+# a version and that `latest` never means anything but main.
+#
+# The image name follows the repository name (`github.repository`), so a
+# repository rename carries the image with it and no name is duplicated here.
+#
+# The image carries the optional `kafka` extra (see the Dockerfile): publishing
+# events is a per-deployment decision made by a flag at runtime, and a second
+# image for the deployments that publish would be the same code twice.
+
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+# A second push to the same branch supersedes the first; a half-finished build
+# of an outdated commit is never worth the runner minutes.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Skipped on pull requests: a fork must not be able to push an image.
+      # The build itself still runs, so a broken Dockerfile fails the review.
+      - name: Log in to ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # `latest` only ever points at main. Deployments that pin a version
+          # use the semver tags; the sha tag is the unambiguous fallback.
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
