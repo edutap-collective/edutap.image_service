@@ -133,3 +133,113 @@ async def test_a_discarded_candidate_does_not_block_the_next_upload(session):
 
     row = (await session.execute(sa.select(PHOTO))).mappings().one()
     assert row["version"] == second.version
+
+
+async def test_the_declaration_reference_lands_in_the_trail(session):
+    await _person_view(session)
+    service, _, _ = build(session)
+    result = await service.submit(person_uid=UID, upload=_png())
+    await session.commit()
+
+    await service.confirm(
+        person_uid=UID,
+        version=result.version,
+        actor="self",
+        rights_declared=True,
+        declaration_tag="v1.0",
+        declaration_sha="a" * 40,
+    )
+    await session.commit()
+
+    entry = (await session.execute(sa.select(REVIEW))).mappings().one()
+    assert entry["details"]["declaration"] == {"tag": "v1.0", "sha": "a" * 40}
+
+
+async def test_the_reference_is_optional(session):
+    """A deployment without a versioned text is not forced to invent one."""
+    await _person_view(session)
+    service, _, _ = build(session)
+    result = await service.submit(person_uid=UID, upload=_png())
+    await session.commit()
+
+    await service.confirm(
+        person_uid=UID, version=result.version, actor="self", rights_declared=True
+    )
+    await session.commit()
+
+    entry = (await session.execute(sa.select(REVIEW))).mappings().one()
+    assert "declaration" not in entry["details"]
+
+
+async def test_a_half_given_reference_is_refused(session):
+    """A tag without its hash records a version nobody can verify later."""
+    service, _, _ = build(session)
+    result = await service.submit(person_uid=UID, upload=_png())
+    await session.commit()
+
+    with pytest.raises(ValueError):
+        await service.confirm(
+            person_uid=UID,
+            version=result.version,
+            actor="self",
+            rights_declared=True,
+            declaration_tag="v1.0",
+        )
+
+
+async def test_a_hash_without_its_tag_is_refused_too(session):
+    service, _, _ = build(session)
+    result = await service.submit(person_uid=UID, upload=_png())
+    await session.commit()
+
+    with pytest.raises(ValueError):
+        await service.confirm(
+            person_uid=UID,
+            version=result.version,
+            actor="self",
+            rights_declared=True,
+            declaration_sha="a" * 40,
+        )
+
+
+async def test_the_reference_is_recorded_not_interpreted(session):
+    """The reference is stored as given -- nothing here knows what the text says."""
+    await _person_view(session)
+    service, _, _ = build(session)
+    result = await service.submit(person_uid=UID, upload=_png())
+    await session.commit()
+
+    await service.confirm(
+        person_uid=UID,
+        version=result.version,
+        actor="self",
+        rights_declared=True,
+        declaration_tag="anything-at-all",
+        declaration_sha="0" * 40,
+    )
+    await session.commit()
+
+    entry = (await session.execute(sa.select(REVIEW))).mappings().one()
+    assert entry["details"]["declaration"]["tag"] == "anything-at-all"
+
+
+async def test_the_reference_does_not_displace_the_verdict(session):
+    """Both belong in the same entry -- one is the claim, the other is the check."""
+    await _person_view(session)
+    service, _, _ = build(session)
+    result = await service.submit(person_uid=UID, upload=_png())
+    await session.commit()
+
+    await service.confirm(
+        person_uid=UID,
+        version=result.version,
+        actor="self",
+        rights_declared=True,
+        declaration_tag="v1.0",
+        declaration_sha="a" * 40,
+    )
+    await session.commit()
+
+    details = (await session.execute(sa.select(REVIEW.c.details))).scalar()
+    assert details["validation"]["passed"] is True
+    assert details["declaration"]["tag"] == "v1.0"

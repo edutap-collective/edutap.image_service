@@ -79,6 +79,10 @@ def client(postgres_dsn, request):
     store = FakeStore()
     image_api = getattr(request, "param", None) or FakeImageApi()
 
+    # The same object the route reports and the ingest check enforces, so a test
+    # asserting on one is asserting on the other.
+    enforced = Limits(max_bytes=5_000_000, max_edge=4096)
+
     @asynccontextmanager
     async def lifespan(app):
         engine = create_async_engine(postgres_dsn)
@@ -96,7 +100,7 @@ def client(postgres_dsn, request):
                         store=store,
                         image_api=image_api,
                         manifest=DEFAULT,
-                        limits=Limits(max_bytes=5_000_000, max_edge=4096),
+                        limits=enforced,
                         placeholder=PLACEHOLDER,
                         reactivation_max_age=timedelta(days=180),
                     ),
@@ -104,6 +108,7 @@ def client(postgres_dsn, request):
 
         app.state.unit_of_work = unit_of_work
         app.state.service_tokens = {"backend": TOKEN}
+        app.state.limits = enforced
         yield
         await engine.dispose()
 
@@ -330,3 +335,74 @@ def test_an_unknown_version_is_a_404(client):
         headers=AUTH,
     )
     assert response.status_code == 404
+
+
+def test_the_declaration_reference_travels_through_the_route(client):
+    version = _upload(client).json()["version"]
+
+    response = client.post(
+        f"/persons/{UID}/photos/{version}/confirm",
+        json={
+            "actor": "user:ab12cde@lmu.de",
+            "rights_declared": True,
+            "declaration_tag": "v1.0",
+            "declaration_sha": "a" * 40,
+        },
+        headers=AUTH,
+    )
+
+    assert response.status_code == 204
+
+
+def test_a_half_given_reference_is_a_bad_request(client):
+    version = _upload(client).json()["version"]
+
+    response = client.post(
+        f"/persons/{UID}/photos/{version}/confirm",
+        json={"actor": "self", "rights_declared": True, "declaration_tag": "v1.0"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 400
+
+
+def test_limits_are_readable_without_a_token(client):
+    """A browser checks them before uploading, and it holds no service token."""
+    response = client.get("/limits")
+
+    assert response.status_code == 200
+
+
+def test_limits_report_what_this_deployment_enforces(client):
+    """One number in one place.
+
+    A second copy in a front end drifts, and then it refuses what this service would
+    have taken. The client fixture builds the service with max_bytes=5_000_000 and
+    max_edge=4096, so the route must report those and not a default.
+    """
+    body = client.get("/limits").json()
+
+    assert body["max_file_bytes"] == 5_000_000
+    assert body["max_image_edge"] == 4096
+
+
+def test_limits_are_reported_as_media_types(client):
+    """A front end puts these in an `accept` attribute; PIL's names are no use there."""
+    formats = client.get("/limits").json()["accepted_formats"]
+
+    assert "image/jpeg" in formats
+    assert "image/png" in formats
+    assert "JPEG" not in formats
+
+
+def test_an_oversized_upload_is_refused_at_the_reported_limit(client):
+    """The reported number and the enforced one are the same number, not two."""
+    reported = client.get("/limits").json()["max_file_bytes"]
+
+    response = client.post(
+        f"/persons/{UID}/photos",
+        files={"file": ("big.png", b"\x89PNG" + b"\x00" * (reported + 1), "image/png")},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 413

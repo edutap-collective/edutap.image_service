@@ -64,6 +64,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         placeholder = _placeholder_bytes(settings)
         chosen = manifest(settings.recipe)
 
+        # One object, not one per unit of work and another for the route that
+        # reports them: the numbers a front end is told and the numbers the ingest
+        # check enforces have to be the same numbers, not two copies of them.
+        enforced = Limits(
+            max_bytes=settings.max_upload_bytes,
+            max_edge=settings.max_image_edge,
+        )
+
         @asynccontextmanager
         async def unit_of_work() -> AsyncIterator[tuple[AsyncSession, PhotoService]]:
             async with AsyncSession(engine, expire_on_commit=False) as session:
@@ -74,10 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         store=store,
                         image_api=image_api,
                         manifest=chosen,
-                        limits=Limits(
-                            max_bytes=settings.max_upload_bytes,
-                            max_edge=settings.max_image_edge,
-                        ),
+                        limits=enforced,
                         placeholder=placeholder,
                         reactivation_max_age=settings.reactivation_max_age,
                     ),
@@ -85,6 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         app.state.unit_of_work = unit_of_work
         app.state.service_tokens = settings.service_tokens
+        app.state.limits = enforced
         try:
             yield
         finally:
