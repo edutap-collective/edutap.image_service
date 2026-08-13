@@ -54,10 +54,12 @@ They apply implicitly to every task:
   `make test-integration` before every pull request. CI calls the same targets.
 - **Branch first, never commit on `main`. Push only when asked.**
 
-## Prerequisite: `edutap.db_definitions` 0.2.1
+## Prerequisite: `edutap.db_definitions` 0.2.1 — **done**
 
-`public.photo` is declared there, not here. Two additions, one release, and it
-must land **before** task 2.
+`public.photo` is declared there, not here. The release exists on the branch
+`feature/photo-draft-state` of that repository and must be merged and installed
+**before** task 2. Three changes; the third was not foreseen when this plan was
+first written.
 
 **The candidate is unique per person**, held by the database for the same reason
 "at most one active version" already is. Next to the existing index in
@@ -97,14 +99,14 @@ call to `edutap.image_api` per upload and can produce a verdict different from t
 one the person was shown. A verdict recorded at the moment it was produced is the
 one the trail should carry.
 
-> [!IMPORTANT]
-> How these reach a running database is unresolved. `edutap.db_definitions` is not
-> registered in `lmu_db_migrate` at all — `registry.UNITS` holds only
-> `lmu_edutap_full_view` — and a `SqlModelUnit` runs `metadata.create_all()`,
-> which creates missing tables and does **not** add a column or an index to a
-> table that already exists. On a deployment that already has `public.photo`,
-> both have to be applied by hand or by a real migration. Raise this with whoever
-> owns the deployment before task 2, not after.
+**`rights_declared_at` becomes nullable.** It was `NOT NULL` with
+`default_factory=_utcnow`, so a candidate would have been stamped with a
+declaration nobody had made yet. It is now set on the confirming transition.
+
+All three render as additive statements — `ADD COLUMN`, `CREATE UNIQUE INDEX`,
+and `ALTER COLUMN … DROP NOT NULL`, none of which contains a marker of
+`compare._DESTRUCTIVE` — so `edutap-dbdef migrate` applies them rather than
+refusing the deploy.
 
 ## File structure
 
@@ -973,8 +975,9 @@ every transition into and out of `draft`; `tests/test_service_confirm.py` is new
 ## Risks
 
 - Requires `edutap.db_definitions` 0.2.1: the partial unique index
-  `uq_photo_one_draft_per_person` and the `draft_details` column. How both reach
-  an existing database is unresolved — see the plan.
+  `uq_photo_one_draft_per_person`, the `draft_details` column, and
+  `rights_declared_at` turning nullable. All three are additive to the migration
+  container, so a deploy applies rather than refuses them.
 - `submit()` loses two parameters. Its only caller today is the route in this
   repository.
 - A candidate is listed by `GET /persons/{uid}/photos` and served by the version
