@@ -51,6 +51,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The broker client, kept out of the core dependencies: publishing events is
+# optional, and a deployment that does not must not have to install it.
+kafka = ["aiokafka>=0.10"]
+
 dev = [
     "pdbp",
     "pytest>=8.2",

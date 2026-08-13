@@ -19,9 +19,11 @@ from uuid import uuid4
 from PIL import Image
 
 from .clients.image_api import ValidationReport
+from .events import NoEvents, PhotoEvents, activated, rejected
 from .ingest import Limits, rights_metadata, sanitise
 from .manifest import MANIFESTS, Manifest, Variant
 from .objectstore import raw_key, variant_key
+from .reference import PHOTO_ASSURANCE
 from .states import (
     EvidenceKind,
     IllegalTransition,
@@ -94,6 +96,19 @@ class Submission:
     stored_objects: int
 
 
+@dataclass(frozen=True)
+class Expired:
+    """What a retention run did, and what it deliberately left alone.
+
+    Two lists rather than a count: an operator reading a deploy log has to be able
+    to tell "nothing was due" from "something was due and is evidence in a
+    proceeding", and a number cannot say which.
+    """
+
+    purged: list[dict[str, Any]]
+    skipped_legal_hold: list[dict[str, Any]]
+
+
 class PhotoService:
     """The use cases, over a repository, an object store and the image API."""
 
@@ -107,6 +122,7 @@ class PhotoService:
         limits: Limits,
         placeholder: bytes,
         reactivation_max_age: timedelta,
+        events: PhotoEvents | None = None,
     ) -> None:
         """Hold the collaborators; the caller owns the transaction the repository uses."""
         self._repository = repository
@@ -116,6 +132,9 @@ class PhotoService:
         self._limits = limits
         self._placeholder = placeholder
         self._reactivation_max_age = reactivation_max_age
+        # A deployment without a broker is a legitimate way to run this service,
+        # so the absence of one is a collaborator and not a special case.
+        self._events = events if events is not None else NoEvents()
 
     async def submit(self, *, person_uid: str, upload: bytes) -> Submission:
         """Accept an uploaded file and keep it as a candidate.
@@ -220,6 +239,14 @@ class PhotoService:
             actor=actor,
             action="approve",
         )
+        await self._events.publish(
+            activated(
+                person_uid,
+                version,
+                evidence_kind=str(evidence_kind),
+                assurance=PHOTO_ASSURANCE[evidence_kind],
+            )
+        )
 
     async def reject(self, *, person_uid: str, version: str, actor: str, reason: str) -> None:
         """Refuse a version awaiting review.
@@ -239,6 +266,10 @@ class PhotoService:
             action="reject",
             reason=reason,
         )
+        # The reason travels with the fact. Whoever writes the mail needs it, and
+        # asking them to read it back out of the trail would be a second query for
+        # something this service already had in hand.
+        await self._events.publish(rejected(person_uid, version, reason=reason))
 
     async def reactivate(self, *, person_uid: str, version: str, actor: str, now: datetime) -> None:
         """Let the person switch back to a version they kept.
@@ -334,6 +365,59 @@ class PhotoService:
     async def list_versions(self, person_uid: str) -> list[dict[str, Any]]:
         """Every version of one person, newest first, for a review client."""
         return await self._repository.list_for(person_uid)
+
+    async def expire(
+        self,
+        *,
+        state: str,
+        older_than: timedelta,
+        now: datetime,
+        actor: str = "retention",
+    ) -> Expired:
+        """Clear what has been due long enough, and report what a hold kept back.
+
+        The service has no clock. The caller supplies the deadline, because the
+        number is the operator's policy and not this package's -- a deadline living
+        here would be one institution's retention rule baked into a standard.
+
+        Only two states are ever offered. `rejected` expires because the person was
+        told and had their fortnight; `draft` expires because nobody was told at all
+        and the bytes would otherwise sit forever. `pending` never expires -- a photo
+        nobody reviewed stays visible, and an operator watches the queue by
+        monitoring rather than by losing the backlog to a timer. `superseded` stays
+        until the person deletes it or leaves.
+
+        Idempotent: a second run finds nothing, because what it cleared carries
+        `purged_at` and a cleared candidate has no row at all.
+        """
+        if state not in (PhotoState.REJECTED, PhotoState.DRAFT):
+            raise ValueError(f"{state!r} does not expire; only rejected and draft do")
+
+        if state == PhotoState.DRAFT:
+            due = await self._repository.stale_drafts(older_than=older_than, now=now)
+        else:
+            due = await self._repository.due_for_expiry(older_than=older_than, now=now, state=state)
+        held = await self._repository.held_and_due(older_than=older_than, now=now, state=state)
+
+        purged = []
+        for row in due:
+            deleted = await self._store.purge_version(row["person_uid"], row["version"])
+            if state == PhotoState.DRAFT:
+                # A candidate leaves no row behind: it has no trail to keep one
+                # readable for, and a kept row would still read `draft` and block
+                # that person's next upload.
+                await self._repository.discard_draft(row["person_uid"])
+            else:
+                await self._repository.mark_purged(
+                    person_uid=row["person_uid"],
+                    version=row["version"],
+                    actor=actor,
+                    objects_deleted=deleted,
+                    action="expire",
+                )
+            purged.append({**row, "objects_deleted": deleted})
+
+        return Expired(purged=purged, skipped_legal_hold=held)
 
     async def _require(self, person_uid: str, version: str) -> dict[str, Any]:
         row = await self._repository.get(person_uid, version)

@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from ..clients.image_api import ImageApiClient
+from ..events import KafkaPhotoEvents, NoEvents
 from ..ingest import Limits
 from ..manifest import manifest
 from ..objectstore import ObjectStore
@@ -67,6 +68,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # One object, not one per unit of work and another for the route that
         # reports them: the numbers a front end is told and the numbers the ingest
         # check enforces have to be the same numbers, not two copies of them.
+        events = (
+            KafkaPhotoEvents(
+                bootstrap_servers=settings.kafka_bootstrap_servers,
+                topic_prefix=settings.kafka_topic_prefix,
+            )
+            if settings.kafka_enabled
+            else NoEvents()
+        )
+        if isinstance(events, KafkaPhotoEvents):
+            await events.start()
+
         enforced = Limits(
             max_bytes=settings.max_upload_bytes,
             max_edge=settings.max_image_edge,
@@ -85,15 +97,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         limits=enforced,
                         placeholder=placeholder,
                         reactivation_max_age=settings.reactivation_max_age,
+                        events=events,
                     ),
                 )
 
         app.state.unit_of_work = unit_of_work
         app.state.service_tokens = settings.service_tokens
         app.state.limits = enforced
+        # The retention route reads `default_expiry_days` from here: the caller
+        # may omit the deadline, and then the deployment's own number applies.
+        app.state.settings = settings
         try:
             yield
         finally:
+            if isinstance(events, KafkaPhotoEvents):
+                # Flush before the loop goes: a shutdown must not drop a fact
+                # the database has already recorded.
+                await events.stop()
             await http.aclose()
             await engine.dispose()
 

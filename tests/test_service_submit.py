@@ -61,7 +61,7 @@ class FakeImageApi:
         return _png((height, height))
 
 
-def build(session, image_api=None):
+def build(session, image_api=None, events=None):
     store = FakeStore()
     api = image_api or FakeImageApi()
     service = PhotoService(
@@ -72,6 +72,7 @@ def build(session, image_api=None):
         limits=Limits(max_bytes=5_000_000, max_edge=4096),
         placeholder=b"placeholder-bytes",
         reactivation_max_age=timedelta(days=180),
+        events=events,
     )
     return service, store, api
 
