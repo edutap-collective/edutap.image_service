@@ -8,7 +8,7 @@ the state machine, where they can be tested without a server.
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
 from ..clients.image_api import ImageApiUnavailable
@@ -24,12 +24,23 @@ Caller = Annotated[str, Depends(require_service_token)]
 
 
 class SubmissionAccepted(BaseModel):
-    """What a front end tells the person who just uploaded."""
+    """What a front end tells the person who just uploaded.
+
+    `state` is `draft` and not `pending`: nobody has been asked to look at this yet,
+    and a front end saying "in review" here would be lying by one step.
+    """
 
     version: str
-    state: str = "pending"
+    state: str = "draft"
     passed: bool
     warnings: list[str] = []
+
+
+class Confirmation(BaseModel):
+    """What a person sends to stand behind the candidate they looked at."""
+
+    actor: str
+    rights_declared: bool = False
 
 
 class Decision(BaseModel):
@@ -46,18 +57,15 @@ async def submit(
     person_uid: str,
     caller: Caller,
     file: Annotated[bytes, File()],
-    actor: Annotated[str, Form()],
-    rights_declared: Annotated[bool, Form()],
 ) -> SubmissionAccepted:
-    """Accept an upload and queue it for review."""
+    """Accept an upload and keep it as a candidate.
+
+    Neither an actor nor a rights declaration: both belong to the confirming call,
+    which is where the person actually stands behind the image.
+    """
     async with request.app.state.unit_of_work() as (session, service):
         try:
-            result = await service.submit(
-                person_uid=person_uid,
-                upload=file,
-                actor=actor,
-                rights_declared=rights_declared,
-            )
+            result = await service.submit(person_uid=person_uid, upload=file)
         except (FileTooLarge, ImageTooLarge, UnsupportedFormat) as exc:
             raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, str(exc)) from exc
         except NoFaceToCrop as exc:
@@ -90,6 +98,32 @@ async def list_versions(request: Request, person_uid: str, caller: Caller) -> li
     """Every version of one person, for a review client."""
     async with request.app.state.unit_of_work() as (_, service):
         return await service.list_versions(person_uid)
+
+
+@router.post("/persons/{person_uid}/photos/{version}/confirm")
+async def confirm_version(
+    request: Request, person_uid: str, version: str, body: Confirmation, caller: Caller
+) -> Response:
+    """Turn a candidate into a submission.
+
+    The version travels in the path although a person has at most one candidate:
+    they confirm what they *saw*. A call without it would confirm whatever is
+    current, which stops being the same thing the moment a second upload happens.
+    """
+    async with request.app.state.unit_of_work() as (session, service):
+        try:
+            await _guarded(
+                service.confirm(
+                    person_uid=person_uid,
+                    version=version,
+                    actor=body.actor,
+                    rights_declared=body.rights_declared,
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/persons/{person_uid}/photos/{version}/approve")
