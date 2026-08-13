@@ -35,33 +35,48 @@ class PhotoRepository:
         self._session = session
         self._origin = origin
 
-    async def add_pending(
+    async def add_draft(
         self,
         *,
         person_uid: str,
         version: str,
         sha256: str,
         recipe: str,
-        actor: str,
         details: dict[str, Any],
     ) -> None:
-        """Record a newly uploaded version and its submission."""
+        """Record an uploaded candidate.
+
+        No review entry and no actor: the trail is the register of claims, and a
+        candidate claims nothing until its owner confirms it. The submission entry
+        is written by :meth:`apply` on that confirmation, where the rights
+        declaration finally exists.
+
+        `details` -- the validation report and any rights claims found in the file
+        -- waits on the row rather than in memory, because the request that
+        produced it and the request that records it are different requests.
+        """
         await self._session.execute(
             sa.insert(PHOTO).values(
                 person_uid=person_uid,
                 version=version,
-                state=PhotoState.PENDING,
+                state=PhotoState.DRAFT,
                 sha256=sha256,
                 recipe=recipe,
+                draft_details=details,
             )
         )
-        await self._append_review(
-            person_uid=person_uid,
-            version=version,
-            action="submit",
-            actor=actor,
-            sha256=sha256,
-            details=details,
+
+    async def discard_draft(self, person_uid: str) -> str | None:
+        """Remove this person's candidate row, if there is one.
+
+        Returns the version so the caller can clear its objects: the row and the
+        objects are removed by two different collaborators, and this is the one
+        that knows the version.
+        """
+        return await self._session.scalar(
+            sa.delete(PHOTO)
+            .where(PHOTO.c.person_uid == person_uid, PHOTO.c.state == PhotoState.DRAFT)
+            .returning(PHOTO.c.version)
         )
 
     async def apply(
@@ -103,6 +118,14 @@ class PhotoRepository:
             # evidence that expired with it must not travel along.
             values["evidence_kind"] = None
             values["photo_assurance"] = None
+
+        if action == "submit":
+            # The declaration is made at confirmation, not at upload: a candidate
+            # its owner discards never carried one. The verdict that waited on the
+            # row moves into the trail with this entry and is cleared here -- one
+            # report in two places is how the two come apart.
+            values["rights_declared_at"] = _now()
+            values["draft_details"] = None
 
         sha256 = await self._session.scalar(
             sa.update(PHOTO)
