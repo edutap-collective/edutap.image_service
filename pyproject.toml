@@ -18,14 +18,31 @@ dependencies = [
     # writes are declared in db_definitions and imported at runtime; data_models is
     # named even though db_definitions pulls it in, because a dependency one relies
     # on but does not declare disappears the moment the package in between drops it.
-    "edutap.data_models @ git+https://github.com/edutap-collective/edutap.data_models@v0.2.0",
-    "edutap.db_definitions @ git+https://github.com/edutap-collective/edutap.db_definitions@v0.1.5",
+    # v0.2.2 rather than v0.2.0: db_definitions v0.2.1 requires >=0.2.1,<0.3, and a
+    # direct reference is an exact pin, not a range -- so the two have to be moved
+    # together or the resolver has nothing to choose.
+    "edutap.data_models @ git+https://github.com/edutap-collective/edutap.data_models@v0.2.2",
+    # Back on a tag: v0.2.1 is the release that carries the `draft` state of
+    # `public.photo`, the partial unique index that keeps it to one per person, the
+    # `draft_details` column and `rights_declared_at` turning nullable. The commit
+    # pin that stood here was the stated exception until a release existed.
+    "edutap.db_definitions @ git+https://github.com/edutap-collective/edutap.db_definitions@v0.2.1",
     "fastapi>=0.115",
     # The client for edutap.image_api. httpx2 rather than httpx: starlette 1.3
     # prefers it and warns whenever it has to fall back, and it is the house
     # standard for REST clients across these packages.
     "httpx2>=2.9",
+    # Decoding and re-encoding on the way in is what strips camera metadata, and
+    # the pixel-count guard is what stops a decompression bomb before a decoder
+    # allocates for it. edutap.image_api analyses and transforms; it does not
+    # sanitise, and it never sees a file that has not passed through here.
+    "pillow>=11",
     "pydantic>=2.8",
+    # An upload arrives as multipart/form-data, and FastAPI raises at *import* time
+    # without this -- not on the first request. A deployment that forgot it would
+    # fail to start rather than fail a upload, which is the better of the two but
+    # only if the requirement is declared.
+    "python-multipart>=0.0.20",
     "pydantic-settings>=2.4",
     # [asyncio] rather than bare sqlalchemy: the async engine needs greenlet, and
     # SQLAlchemy leaves it to that extra rather than to the core requirement.
@@ -34,6 +51,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The broker client, kept out of the core dependencies: publishing events is
+# optional, and a deployment that does not must not have to install it.
+kafka = ["aiokafka>=0.10"]
+
 dev = [
     "pdbp",
     "pytest>=8.2",
@@ -49,6 +70,10 @@ docs = ["myst-parser", "sphinx>=8"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/edutap"]
+# The placeholder is served by the one unauthenticated route, so a wheel without it
+# answers 500 for every person who has not uploaded anything -- which is all of them
+# on day one.
+artifacts = ["src/edutap/image_service/assets/*.png"]
 
 [tool.hatch.metadata]
 # Required by hatchling for the direct references (git URLs, not PyPI names) above.
@@ -83,4 +108,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Tests document themselves through their names and their docstrings where the
 # reasoning is not obvious. `assert` is the point of a test, not a security finding.
-"tests/*" = ["D100", "D103", "S101"]
+# The class rules go with the function ones: a test double is named for what it
+# fakes, and requiring prose on `FakeStore.__init__` produces noise rather than
+# explanation.
+"tests/*" = ["D100", "D101", "D102", "D103", "D107", "S101"]

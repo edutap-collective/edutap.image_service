@@ -22,6 +22,7 @@ class PhotoState(StrEnum):
     Stored as text rather than as a native enum, so a new state is not a migration.
     """
 
+    DRAFT = "draft"
     PENDING = "pending"
     ACTIVE = "active"
     REJECTED = "rejected"
@@ -73,6 +74,20 @@ class Outcome:
     new_state: PhotoState
     supersede_active: bool = False
     evidence_kind: EvidenceKind | None = None
+
+
+def confirm(current: PhotoState) -> Outcome:
+    """Turn a candidate its owner has looked at into a submission.
+
+    The only way out of `draft` other than deletion, and it leads to `pending` and
+    nowhere else. A candidate is not a weaker submission: nobody has seen it, no
+    review entry mentions it, and it carries no rights declaration until this step.
+    That is why :func:`approve` refuses it -- approving something its owner never
+    stood behind would record a decision about an image nobody submitted.
+    """
+    if current is not PhotoState.DRAFT:
+        raise IllegalTransition(f"a {current} version cannot be confirmed")
+    return Outcome(PhotoState.PENDING)
 
 
 def approve(current: PhotoState, *, evidence_kind: EvidenceKind | None) -> Outcome:
