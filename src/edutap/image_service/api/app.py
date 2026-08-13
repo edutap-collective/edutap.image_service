@@ -91,6 +91,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.unit_of_work = unit_of_work
         app.state.service_tokens = settings.service_tokens
         app.state.limits = enforced
+        # The retention route reads `default_expiry_days` from here: the caller
+        # may omit the deadline, and then the deployment's own number applies.
+        app.state.settings = settings
         try:
             yield
         finally:

@@ -8,6 +8,7 @@ must not be confused, and the one route that has no token on it.
 import io
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 from edutap.db_definitions.public import metadata
@@ -82,6 +83,9 @@ def client(postgres_dsn, request):
     # The same object the route reports and the ingest check enforces, so a test
     # asserting on one is asserting on the other.
     enforced = Limits(max_bytes=5_000_000, max_edge=4096)
+    # Only `default_expiry_days` is read from here, by the retention route when the
+    # caller omits a deadline. A real Settings would want a database and a bucket.
+    settings = SimpleNamespace(default_expiry_days=14)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -109,6 +113,7 @@ def client(postgres_dsn, request):
         app.state.unit_of_work = unit_of_work
         app.state.service_tokens = {"backend": TOKEN}
         app.state.limits = enforced
+        app.state.settings = settings
         yield
         await engine.dispose()
 
@@ -406,3 +411,34 @@ def test_an_oversized_upload_is_refused_at_the_reported_limit(client):
     )
 
     assert response.status_code == 413
+
+
+def test_the_retention_run_reports_what_it_did(client):
+    """The answer is the record: an operator reads it in a deploy log."""
+    response = client.post(
+        "/maintenance/expire",
+        json={"state": "rejected", "older_than_days": 14},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["purged"] == []
+    assert body["skipped_legal_hold"] == []
+
+
+def test_a_state_that_never_expires_is_a_bad_request(client):
+    """`pending` stays and stays visible -- an operator watches the queue, not a timer."""
+    response = client.post("/maintenance/expire", json={"state": "pending"}, headers=AUTH)
+    assert response.status_code == 400
+
+
+def test_the_deadline_may_be_omitted(client):
+    """Then the deployment's configured default applies, not a constant in here."""
+    response = client.post("/maintenance/expire", json={}, headers=AUTH)
+    assert response.status_code == 200
+
+
+def test_the_retention_run_needs_a_token(client):
+    """Not a public route: it deletes."""
+    assert client.post("/maintenance/expire", json={}).status_code == 401

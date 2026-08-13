@@ -5,7 +5,7 @@ maps the refusal it gets back onto a status code — the refusals themselves liv
 the state machine, where they can be tested without a server.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, status
@@ -48,6 +48,26 @@ class SubmissionAccepted(BaseModel):
     state: str = "draft"
     passed: bool
     warnings: list[str] = []
+
+
+class ExpiryRequest(BaseModel):
+    """What a retention run is told to do.
+
+    `older_than_days` may be omitted, and then the deployment's configured default
+    applies. It is not a constant here: the number is the operator's retention
+    policy, and one living in this package would be one institution's rule baked
+    into a standard.
+    """
+
+    state: str = "rejected"
+    older_than_days: int | None = None
+
+
+class ExpiryReport(BaseModel):
+    """What the run did, and what it deliberately left alone."""
+
+    purged: list[dict[str, Any]]
+    skipped_legal_hold: list[dict[str, Any]]
 
 
 class Confirmation(BaseModel):
@@ -233,6 +253,35 @@ async def deliver_version(
         except VersionNotFound as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     return Response(content=delivered.data, media_type=delivered.content_type)
+
+
+@router.post("/maintenance/expire")
+async def expire(request: Request, body: ExpiryRequest, caller: Caller) -> ExpiryReport:
+    """Clear what has been due long enough. Externally driven, on purpose.
+
+    This service has no clock. Whoever operates it decides when this runs and how
+    long the deadline is; a scheduler in here would be this package deciding an
+    operator's policy.
+
+    Idempotent, so it may be called as often as anyone likes, and the answer is the
+    record of what happened -- including what a legal hold kept back, which is the
+    half a count could not report.
+    """
+    settings = request.app.state.settings
+    days = (
+        body.older_than_days if body.older_than_days is not None else settings.default_expiry_days
+    )
+    async with request.app.state.unit_of_work() as (session, service):
+        try:
+            result = await service.expire(
+                state=body.state,
+                older_than=timedelta(days=days),
+                now=datetime.now(tz=UTC),
+            )
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        await session.commit()
+    return ExpiryReport(purged=result.purged, skipped_legal_hold=result.skipped_legal_hold)
 
 
 @public.get("/limits")

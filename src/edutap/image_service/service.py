@@ -94,6 +94,19 @@ class Submission:
     stored_objects: int
 
 
+@dataclass(frozen=True)
+class Expired:
+    """What a retention run did, and what it deliberately left alone.
+
+    Two lists rather than a count: an operator reading a deploy log has to be able
+    to tell "nothing was due" from "something was due and is evidence in a
+    proceeding", and a number cannot say which.
+    """
+
+    purged: list[dict[str, Any]]
+    skipped_legal_hold: list[dict[str, Any]]
+
+
 class PhotoService:
     """The use cases, over a repository, an object store and the image API."""
 
@@ -334,6 +347,59 @@ class PhotoService:
     async def list_versions(self, person_uid: str) -> list[dict[str, Any]]:
         """Every version of one person, newest first, for a review client."""
         return await self._repository.list_for(person_uid)
+
+    async def expire(
+        self,
+        *,
+        state: str,
+        older_than: timedelta,
+        now: datetime,
+        actor: str = "retention",
+    ) -> Expired:
+        """Clear what has been due long enough, and report what a hold kept back.
+
+        The service has no clock. The caller supplies the deadline, because the
+        number is the operator's policy and not this package's -- a deadline living
+        here would be one institution's retention rule baked into a standard.
+
+        Only two states are ever offered. `rejected` expires because the person was
+        told and had their fortnight; `draft` expires because nobody was told at all
+        and the bytes would otherwise sit forever. `pending` never expires -- a photo
+        nobody reviewed stays visible, and an operator watches the queue by
+        monitoring rather than by losing the backlog to a timer. `superseded` stays
+        until the person deletes it or leaves.
+
+        Idempotent: a second run finds nothing, because what it cleared carries
+        `purged_at` and a cleared candidate has no row at all.
+        """
+        if state not in (PhotoState.REJECTED, PhotoState.DRAFT):
+            raise ValueError(f"{state!r} does not expire; only rejected and draft do")
+
+        if state == PhotoState.DRAFT:
+            due = await self._repository.stale_drafts(older_than=older_than, now=now)
+        else:
+            due = await self._repository.due_for_expiry(older_than=older_than, now=now, state=state)
+        held = await self._repository.held_and_due(older_than=older_than, now=now, state=state)
+
+        purged = []
+        for row in due:
+            deleted = await self._store.purge_version(row["person_uid"], row["version"])
+            if state == PhotoState.DRAFT:
+                # A candidate leaves no row behind: it has no trail to keep one
+                # readable for, and a kept row would still read `draft` and block
+                # that person's next upload.
+                await self._repository.discard_draft(row["person_uid"])
+            else:
+                await self._repository.mark_purged(
+                    person_uid=row["person_uid"],
+                    version=row["version"],
+                    actor=actor,
+                    objects_deleted=deleted,
+                    action="expire",
+                )
+            purged.append({**row, "objects_deleted": deleted})
+
+        return Expired(purged=purged, skipped_legal_hold=held)
 
     async def _require(self, person_uid: str, version: str) -> dict[str, Any]:
         row = await self._repository.get(person_uid, version)

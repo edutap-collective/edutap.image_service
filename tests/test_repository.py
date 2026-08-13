@@ -345,3 +345,74 @@ async def test_a_pending_version_is_not_dated_twice(session):
     await session.commit()
 
     assert (await session.execute(sa.select(PHOTO.c.rights_declared_at))).scalar() == declared_at
+
+
+async def test_a_stale_candidate_is_offered_for_expiry(session):
+    """A candidate's clock runs from creation: nobody is notified about one."""
+    await repo(session).add_draft(
+        person_uid=UID, version="cand", sha256="a" * 64, recipe="default", details={}
+    )
+    await session.execute(sa.update(PHOTO).values(created_at=NOW - timedelta(days=3)))
+    await session.commit()
+
+    due = await repo(session).stale_drafts(older_than=timedelta(days=1), now=NOW)
+
+    assert [row["version"] for row in due] == ["cand"]
+
+
+async def test_a_fresh_candidate_is_not_offered(session):
+    await repo(session).add_draft(
+        person_uid=UID, version="cand", sha256="a" * 64, recipe="default", details={}
+    )
+    await session.execute(sa.update(PHOTO).values(created_at=NOW - timedelta(hours=2)))
+    await session.commit()
+
+    assert await repo(session).stale_drafts(older_than=timedelta(days=1), now=NOW) == []
+
+
+async def test_a_held_candidate_is_not_offered(session):
+    """A hold defeats every deletion path, and a candidate is no exception."""
+    r = repo(session)
+    await r.add_draft(person_uid=UID, version="cand", sha256="a" * 64, recipe="default", details={})
+    await session.execute(
+        sa.update(PHOTO).values(created_at=NOW - timedelta(days=3), legal_hold_since=NOW)
+    )
+    await session.commit()
+
+    assert await r.stale_drafts(older_than=timedelta(days=1), now=NOW) == []
+
+
+async def test_what_a_hold_alone_keeps_back_is_reportable(session):
+    """The run answers with what it skipped, so a hold is visible in a deploy log."""
+    r = repo(session)
+    await _submit(r)
+    await session.execute(
+        sa.update(PHOTO).values(
+            state=PhotoState.REJECTED,
+            notified_at=NOW - timedelta(days=30),
+            legal_hold_since=NOW,
+        )
+    )
+    await session.commit()
+
+    held = await r.held_and_due(older_than=timedelta(days=14), now=NOW)
+
+    assert [row["version"] for row in held] == ["v1"]
+
+
+async def test_an_expiry_is_distinguishable_from_a_purge_in_the_trail(session):
+    """The row looks identical afterwards; only the trail says which happened."""
+    r = repo(session)
+    await _submit(r)
+    await r.mark_purged(
+        person_uid=UID, version="v1", actor="retention", objects_deleted=4, action="expire"
+    )
+    await session.commit()
+
+    actions = [
+        row["action"]
+        for row in (
+            await session.execute(sa.select(REVIEW).order_by(REVIEW.c.occurred_at))
+        ).mappings()
+    ]
+    assert actions == ["submit", "expire"]
