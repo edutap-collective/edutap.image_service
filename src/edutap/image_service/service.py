@@ -19,7 +19,7 @@ from uuid import uuid4
 from PIL import Image
 
 from .clients.image_api import ValidationReport
-from .events import NoEvents, PhotoEvents, activated, rejected
+from .events import NoEvents, PhotoEvents, activated, held, rejected, withdrawn
 from .ingest import Limits, rights_metadata, sanitise
 from .manifest import MANIFESTS, Manifest, Variant
 from .objectstore import raw_key, variant_key
@@ -33,6 +33,7 @@ from .states import (
     purge,
     reactivate,
     reject,
+    withdraw,
 )
 
 
@@ -365,6 +366,63 @@ class PhotoService:
     async def list_versions(self, person_uid: str) -> list[dict[str, Any]]:
         """Every version of one person, newest first, for a review client."""
         return await self._repository.list_for(person_uid)
+
+    async def mark_notified(self, *, person_uid: str, version: str, when: datetime) -> None:
+        """Record that the person was told about a decision.
+
+        Called by whoever sent the message. This is the feedback loop that starts the
+        retention clock, and it is why the clock is not started at the rejection: the
+        service that refuses a photograph does not send the mail, and a clock started
+        on a message nobody has sent yet would run against the wrong moment.
+        """
+        await self._require(person_uid, version)
+        await self._repository.mark_notified(person_uid=person_uid, version=version, when=when)
+
+    async def set_hold(self, *, person_uid: str, version: str, actor: str, reason: str) -> None:
+        """Place a legal hold and say so immediately.
+
+        The event is not a nicety. Deleting the person removes held versions too, so
+        a handover to whoever needs the evidence has to happen while the person is
+        still on file -- and nobody watches this table.
+        """
+        await self._require(person_uid, version)
+        await self._repository.set_legal_hold(
+            person_uid=person_uid, version=version, actor=actor, reason=reason
+        )
+        await self._events.publish(held(person_uid, version, reason=reason, by=actor))
+
+    async def release_hold(self, *, person_uid: str, version: str, actor: str) -> None:
+        """Lift a legal hold.
+
+        A narrower right than placing one. This service authenticates services and
+        not roles, so which caller may do it is the front end's promise -- what is
+        enforced here is only that it lands in the trail.
+        """
+        await self._require(person_uid, version)
+        await self._repository.release_legal_hold(
+            person_uid=person_uid, version=version, actor=actor
+        )
+
+    async def reset_to_placeholder(self, *, person_uid: str, actor: str) -> bool:
+        """Withdraw the active photograph without deleting it.
+
+        The version becomes `superseded` rather than disappearing: the person may
+        still switch back to it, and the review trail keeps saying what was once on
+        the card. Answers whether there was anything to withdraw, so a caller can
+        tell "done" from "there was no photograph" without a second query.
+        """
+        active = await self._repository.active_for(person_uid)
+        if active is None:
+            return False
+        await self._repository.apply(
+            person_uid=person_uid,
+            version=active["version"],
+            outcome=withdraw(PhotoState(active["state"])),
+            actor=actor,
+            action="reset",
+        )
+        await self._events.publish(withdrawn(person_uid))
+        return True
 
     async def expire(
         self,

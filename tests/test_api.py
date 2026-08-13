@@ -442,3 +442,68 @@ def test_the_deadline_may_be_omitted(client):
 def test_the_retention_run_needs_a_token(client):
     """Not a public route: it deletes."""
     assert client.post("/maintenance/expire", json={}).status_code == 401
+
+
+def test_reporting_a_notification_is_accepted(client):
+    version = _submit(client)
+
+    response = client.post(f"/persons/{UID}/photos/{version}/notified", json={}, headers=AUTH)
+
+    assert response.status_code == 204
+
+
+def test_a_hold_needs_a_reason(client):
+    version = _submit(client)
+
+    response = client.post(
+        f"/persons/{UID}/photos/{version}/hold", json={"actor": "desk"}, headers=AUTH
+    )
+
+    assert response.status_code == 400
+
+
+def test_a_hold_is_placed_and_lifted_again(client):
+    version = _submit(client)
+
+    placed = client.post(
+        f"/persons/{UID}/photos/{version}/hold",
+        json={"actor": "desk:kb12", "reason": "Betrug"},
+        headers=AUTH,
+    )
+    lifted = client.delete(f"/persons/{UID}/photos/{version}/hold?actor=legal:head", headers=AUTH)
+
+    assert placed.status_code == 204
+    assert lifted.status_code == 204
+
+
+def test_a_reset_without_an_active_photograph_is_a_404(client):
+    """So a caller can tell "done" from "there was nothing" without a second query."""
+    response = client.post(
+        f"/persons/{UID}/photos/reset", json={"actor": "desk:kb12"}, headers=AUTH
+    )
+
+    assert response.status_code == 404
+
+
+def test_a_reset_withdraws_the_active_photograph(client):
+    version = _submit(client)
+    client.post(
+        f"/persons/{UID}/photos/{version}/approve",
+        json={"actor": "desk:kb12", "evidence_kind": EvidenceKind.SUPPORT_VISUAL},
+        headers=AUTH,
+    )
+
+    response = client.post(
+        f"/persons/{UID}/photos/reset", json={"actor": "desk:kb12"}, headers=AUTH
+    )
+
+    assert response.status_code == 204
+    current = client.get(f"/persons/{UID}/photo/current/default/square-512")
+    assert current.headers["X-Photo-Placeholder"] == "true"
+
+
+def test_the_new_reviewer_routes_all_need_a_token(client):
+    assert client.post(f"/persons/{UID}/photos/v/notified", json={}).status_code == 401
+    assert client.post(f"/persons/{UID}/photos/v/hold", json={"actor": "x"}).status_code == 401
+    assert client.delete(f"/persons/{UID}/photos/v/hold?actor=x").status_code == 401
+    assert client.post(f"/persons/{UID}/photos/reset", json={"actor": "x"}).status_code == 401

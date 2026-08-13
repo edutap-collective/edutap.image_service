@@ -31,7 +31,7 @@ class PhotoEvent:
 
     event: str
     person_uid: str
-    version: str
+    version: str | None
     occurred_at: datetime
     facts: dict[str, Any]
 
@@ -41,7 +41,7 @@ class PhotoEvent:
             {
                 "event": self.event,
                 "person_uid": self.person_uid,
-                "version": self.version,
+                **({"version": self.version} if self.version is not None else {}),
                 "occurred_at": self.occurred_at.isoformat(),
                 **self.facts,
             }
@@ -139,4 +139,35 @@ def rejected(person_uid: str, version: str, *, reason: str) -> PhotoEvent:
         version=version,
         occurred_at=datetime.now(tz=UTC),
         facts={"reason": reason},
+    )
+
+
+def withdrawn(person_uid: str) -> PhotoEvent:
+    """Announce that the person has no active photograph any more.
+
+    No version: what a consumer needs to know is that the card now shows a
+    placeholder, and which version stopped being active does not change that.
+    """
+    return PhotoEvent(
+        event="photo.withdrawn",
+        person_uid=person_uid,
+        version=None,
+        occurred_at=datetime.now(tz=UTC),
+        facts={},
+    )
+
+
+def held(person_uid: str, version: str, *, reason: str, by: str) -> PhotoEvent:
+    """Announce that a legal hold was placed.
+
+    Published because somebody has to be told *now*: the deletion of the person
+    removes held versions too, so the handover has to happen while the person is
+    still on file. Nobody watches this table.
+    """
+    return PhotoEvent(
+        event="photo.held",
+        person_uid=person_uid,
+        version=version,
+        occurred_at=datetime.now(tz=UTC),
+        facts={"reason": reason, "by": by},
     )

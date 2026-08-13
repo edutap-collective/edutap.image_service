@@ -143,6 +143,23 @@ def reactivate(
     return Outcome(PhotoState.ACTIVE, supersede_active=True, evidence_kind=evidence_kind)
 
 
+def withdraw(current: PhotoState) -> Outcome:
+    """Take the active photograph off the card without deleting it.
+
+    Only from `active`, and it lands on `superseded` rather than nowhere: the person
+    may still switch back to it, and the review trail keeps saying what was once on
+    the card. Deleting instead would answer a different question -- "remove this
+    image" rather than "stop showing it" -- and only a reviewer may ask the first.
+
+    A transition rather than an `Outcome` a caller builds itself. Every invariant of
+    this service lives here, and one assembled at a call site is one this module
+    cannot refuse.
+    """
+    if current is not PhotoState.ACTIVE:
+        raise IllegalTransition(f"a {current} version is not on any card to withdraw")
+    return Outcome(PhotoState.SUPERSEDED)
+
+
 def purge(current: PhotoState, *, legal_hold_since: datetime | None) -> None:
     """Check that the bytes of this version may be cleared.
 

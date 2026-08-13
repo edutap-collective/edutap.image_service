@@ -183,6 +183,20 @@ class PhotoRepository:
             details={"objects_deleted": objects_deleted},
         )
 
+    async def mark_notified(self, *, person_uid: str, version: str, when: datetime) -> None:
+        """Record that the person was told, which starts the retention clock.
+
+        Written by whoever sent the message, not by whoever made the decision. The
+        clock has to run from the notification -- somebody away for three weeks would
+        otherwise lose the photograph before ever learning it was refused -- and the
+        service that rejects does not send the mail.
+        """
+        await self._session.execute(
+            sa.update(PHOTO)
+            .where(PHOTO.c.person_uid == person_uid, PHOTO.c.version == version)
+            .values(notified_at=when, updated_at=_now())
+        )
+
     async def set_legal_hold(
         self, *, person_uid: str, version: str, actor: str, reason: str
     ) -> None:

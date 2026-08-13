@@ -70,6 +70,25 @@ class ExpiryReport(BaseModel):
     skipped_legal_hold: list[dict[str, Any]]
 
 
+class Notification(BaseModel):
+    """What whoever sent the message reports back."""
+
+    when: datetime | None = None
+
+
+class Hold(BaseModel):
+    """A reviewer placing or lifting a legal hold."""
+
+    actor: str
+    reason: str | None = None
+
+
+class Reset(BaseModel):
+    """A reviewer taking the active photograph off the card."""
+
+    actor: str
+
+
 class Confirmation(BaseModel):
     """What a person sends to stand behind the candidate they looked at.
 
@@ -253,6 +272,70 @@ async def deliver_version(
         except VersionNotFound as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     return Response(content=delivered.data, media_type=delivered.content_type)
+
+
+@router.post("/persons/{person_uid}/photos/{version}/notified")
+async def mark_notified(
+    request: Request, person_uid: str, version: str, body: Notification, caller: Caller
+) -> Response:
+    """Report that the person was told about a decision.
+
+    The feedback loop that starts the retention clock. This service refuses a
+    photograph; it does not send the mail, so it cannot know when the person heard
+    -- and a clock started at the rejection would run against the wrong moment.
+    """
+    when = body.when or datetime.now(tz=UTC)
+    async with request.app.state.unit_of_work() as (session, service):
+        await _guarded(service.mark_notified(person_uid=person_uid, version=version, when=when))
+        await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/persons/{person_uid}/photos/{version}/hold")
+async def set_hold(
+    request: Request, person_uid: str, version: str, body: Hold, caller: Caller
+) -> Response:
+    """Place a legal hold. Every deletion path skips the version from here on."""
+    if not body.reason:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "a hold needs a reason")
+    async with request.app.state.unit_of_work() as (session, service):
+        await _guarded(
+            service.set_hold(
+                person_uid=person_uid, version=version, actor=body.actor, reason=body.reason
+            )
+        )
+        await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/persons/{person_uid}/photos/{version}/hold")
+async def release_hold(
+    request: Request, person_uid: str, version: str, actor: str, caller: Caller
+) -> Response:
+    """Lift a legal hold. A narrower right than placing one."""
+    async with request.app.state.unit_of_work() as (session, service):
+        await _guarded(service.release_hold(person_uid=person_uid, version=version, actor=actor))
+        await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/persons/{person_uid}/photos/reset")
+async def reset_to_placeholder(
+    request: Request, person_uid: str, body: Reset, caller: Caller
+) -> Response:
+    """Take the active photograph off the card, back to the placeholder.
+
+    `204` when something was withdrawn, `404` when there was nothing on the card --
+    so a caller can tell the two apart without a second query.
+    """
+    async with request.app.state.unit_of_work() as (session, service):
+        withdrew = await _guarded(
+            service.reset_to_placeholder(person_uid=person_uid, actor=body.actor)
+        )
+        await session.commit()
+    if not withdrew:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no active photograph to withdraw")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/maintenance/expire")
