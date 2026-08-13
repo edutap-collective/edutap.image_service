@@ -30,6 +30,12 @@ class Settings(BaseSettings):
 
     kafka_topic_prefix: str = "edutap.dev"
 
+    #: Off by default, and `aiokafka` lives in the optional `kafka` extra: a
+    #: deployment that does not publish events must not have to install a broker
+    #: client to run the service.
+    kafka_enabled: bool = False
+    kafka_bootstrap_servers: str = ""
+
     public_origin: str = "http://localhost:8000"
     """External origin of this service.
 

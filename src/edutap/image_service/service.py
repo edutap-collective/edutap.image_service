@@ -19,9 +19,11 @@ from uuid import uuid4
 from PIL import Image
 
 from .clients.image_api import ValidationReport
+from .events import NoEvents, PhotoEvents, activated, rejected
 from .ingest import Limits, rights_metadata, sanitise
 from .manifest import MANIFESTS, Manifest, Variant
 from .objectstore import raw_key, variant_key
+from .reference import PHOTO_ASSURANCE
 from .states import (
     EvidenceKind,
     IllegalTransition,
@@ -120,6 +122,7 @@ class PhotoService:
         limits: Limits,
         placeholder: bytes,
         reactivation_max_age: timedelta,
+        events: PhotoEvents | None = None,
     ) -> None:
         """Hold the collaborators; the caller owns the transaction the repository uses."""
         self._repository = repository
@@ -129,6 +132,9 @@ class PhotoService:
         self._limits = limits
         self._placeholder = placeholder
         self._reactivation_max_age = reactivation_max_age
+        # A deployment without a broker is a legitimate way to run this service,
+        # so the absence of one is a collaborator and not a special case.
+        self._events = events if events is not None else NoEvents()
 
     async def submit(self, *, person_uid: str, upload: bytes) -> Submission:
         """Accept an uploaded file and keep it as a candidate.
@@ -233,6 +239,14 @@ class PhotoService:
             actor=actor,
             action="approve",
         )
+        await self._events.publish(
+            activated(
+                person_uid,
+                version,
+                evidence_kind=str(evidence_kind),
+                assurance=PHOTO_ASSURANCE[evidence_kind],
+            )
+        )
 
     async def reject(self, *, person_uid: str, version: str, actor: str, reason: str) -> None:
         """Refuse a version awaiting review.
@@ -252,6 +266,10 @@ class PhotoService:
             action="reject",
             reason=reason,
         )
+        # The reason travels with the fact. Whoever writes the mail needs it, and
+        # asking them to read it back out of the trail would be a second query for
+        # something this service already had in hand.
+        await self._events.publish(rejected(person_uid, version, reason=reason))
 
     async def reactivate(self, *, person_uid: str, version: str, actor: str, now: datetime) -> None:
         """Let the person switch back to a version they kept.
