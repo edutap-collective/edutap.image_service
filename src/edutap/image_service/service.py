@@ -159,7 +159,14 @@ class PhotoService:
         return Submission(version=version, report=report, stored_objects=stored)
 
     async def confirm(
-        self, *, person_uid: str, version: str, actor: str, rights_declared: bool
+        self,
+        *,
+        person_uid: str,
+        version: str,
+        actor: str,
+        rights_declared: bool,
+        declaration_tag: str | None = None,
+        declaration_sha: str | None = None,
     ) -> None:
         """Turn a candidate into a submission, carrying the rights declaration.
 
@@ -168,21 +175,36 @@ class PhotoService:
         reviewer to read and never evaluated -- so a confirmation without it is
         refused here rather than defaulted.
 
+        `declaration_tag` and `declaration_sha` identify the wording the person
+        agreed to. They are **recorded, not interpreted**: what the text says, who
+        wrote it and where it lives is the deployment's business, and a service that
+        grew an opinion about it would stop being adoptable elsewhere.
+
+        Both or neither. A tag without its hash records a version nobody can verify
+        later -- a tag can be moved and a hash cannot -- and a declaration that
+        cannot be checked is the failure this pair exists to prevent.
+
         The verdict the upload produced travels from the candidate row into the
         review entry, which is why it waited there: the request that produced it and
         this one are different requests.
         """
         if not rights_declared:
             raise ValueError("a submission needs the uploader's rights declaration")
+        if bool(declaration_tag) != bool(declaration_sha):
+            raise ValueError("a declaration reference needs both a tag and a hash")
+
         current = await self._require(person_uid, version)
         outcome = confirm(PhotoState(current["state"]))
+        details = dict(current.get("draft_details") or {})
+        if declaration_tag and declaration_sha:
+            details["declaration"] = {"tag": declaration_tag, "sha": declaration_sha}
         await self._repository.apply(
             person_uid=person_uid,
             version=version,
             outcome=outcome,
             actor=actor,
             action="submit",
-            details=current.get("draft_details") or {},
+            details=details,
         )
 
     async def approve(

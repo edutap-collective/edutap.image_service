@@ -330,3 +330,32 @@ def test_an_unknown_version_is_a_404(client):
         headers=AUTH,
     )
     assert response.status_code == 404
+
+
+def test_the_declaration_reference_travels_through_the_route(client):
+    version = _upload(client).json()["version"]
+
+    response = client.post(
+        f"/persons/{UID}/photos/{version}/confirm",
+        json={
+            "actor": "user:ab12cde@lmu.de",
+            "rights_declared": True,
+            "declaration_tag": "v1.0",
+            "declaration_sha": "a" * 40,
+        },
+        headers=AUTH,
+    )
+
+    assert response.status_code == 204
+
+
+def test_a_half_given_reference_is_a_bad_request(client):
+    version = _upload(client).json()["version"]
+
+    response = client.post(
+        f"/persons/{UID}/photos/{version}/confirm",
+        json={"actor": "self", "rights_declared": True, "declaration_tag": "v1.0"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 400

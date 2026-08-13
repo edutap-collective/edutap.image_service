@@ -37,10 +37,17 @@ class SubmissionAccepted(BaseModel):
 
 
 class Confirmation(BaseModel):
-    """What a person sends to stand behind the candidate they looked at."""
+    """What a person sends to stand behind the candidate they looked at.
+
+    The declaration reference is opaque here. A deployment that versions its
+    rights-declaration text in a repository sends the tag and the commit hash; one
+    that does not sends neither.
+    """
 
     actor: str
     rights_declared: bool = False
+    declaration_tag: str | None = None
+    declaration_sha: str | None = None
 
 
 class Decision(BaseModel):
@@ -118,6 +125,8 @@ async def confirm_version(
                     version=version,
                     actor=body.actor,
                     rights_declared=body.rights_declared,
+                    declaration_tag=body.declaration_tag,
+                    declaration_sha=body.declaration_sha,
                 )
             )
         except ValueError as exc:
