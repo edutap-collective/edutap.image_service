@@ -27,6 +27,7 @@ from .states import (
     IllegalTransition,
     PhotoState,
     approve,
+    confirm,
     purge,
     reactivate,
     reject,
@@ -116,34 +117,35 @@ class PhotoService:
         self._placeholder = placeholder
         self._reactivation_max_age = reactivation_max_age
 
-    async def submit(
-        self, *, person_uid: str, upload: bytes, actor: str, rights_declared: bool
-    ) -> Submission:
-        """Accept an uploaded file and record it as a pending version.
+    async def submit(self, *, person_uid: str, upload: bytes) -> Submission:
+        """Accept an uploaded file and keep it as a candidate.
 
-        `rights_declared` is not a courtesy flag. It is the declaration that carries
-        the legal weight -- copyright metadata found in the file is recorded for a
-        reviewer to read and never evaluated -- so a submission without it is
-        refused here rather than defaulted.
+        No rights declaration here. It is made when the person confirms what they
+        see, so a candidate they discard never carried one -- and a declaration
+        collected twice is one nobody can point at.
+
+        A previous candidate is cleared first. The database allows at most one per
+        person; doing it here rather than letting the insert fail turns "upload
+        another one" into what it obviously means.
         """
-        if not rights_declared:
-            raise ValueError("a submission needs the uploader's rights declaration")
-
         image = sanitise(upload, limits=self._limits)
         claims = rights_metadata(upload)
         report = await self._image_api.validate_and_crop(image.data)
         if report.crop is None:
             raise NoFaceToCrop(report)
 
+        previous = await self._repository.discard_draft(person_uid)
+        if previous is not None:
+            await self._store.purge_version(person_uid, previous)
+
         version = str(uuid4())
         stored = await self._store_version(person_uid, version, image.data, report.crop)
 
-        await self._repository.add_pending(
+        await self._repository.add_draft(
             person_uid=person_uid,
             version=version,
             sha256=image.sha256,
             recipe=self._manifest.name,
-            actor=actor,
             details={
                 "validation": {
                     "passed": report.passed,
@@ -155,6 +157,33 @@ class PhotoService:
             },
         )
         return Submission(version=version, report=report, stored_objects=stored)
+
+    async def confirm(
+        self, *, person_uid: str, version: str, actor: str, rights_declared: bool
+    ) -> None:
+        """Turn a candidate into a submission, carrying the rights declaration.
+
+        `rights_declared` is not a courtesy flag. It is the declaration that carries
+        the legal weight -- copyright metadata found in the file is recorded for a
+        reviewer to read and never evaluated -- so a confirmation without it is
+        refused here rather than defaulted.
+
+        The verdict the upload produced travels from the candidate row into the
+        review entry, which is why it waited there: the request that produced it and
+        this one are different requests.
+        """
+        if not rights_declared:
+            raise ValueError("a submission needs the uploader's rights declaration")
+        current = await self._require(person_uid, version)
+        outcome = confirm(PhotoState(current["state"]))
+        await self._repository.apply(
+            person_uid=person_uid,
+            version=version,
+            outcome=outcome,
+            actor=actor,
+            action="submit",
+            details=current.get("draft_details") or {},
+        )
 
     async def approve(
         self, *, person_uid: str, version: str, evidence_kind: EvidenceKind, actor: str
@@ -229,6 +258,15 @@ class PhotoService:
         current = await self._require(person_uid, version)
         purge(PhotoState(current["state"]), legal_hold_since=current["legal_hold_since"])
         deleted = await self._store.purge_version(person_uid, version)
+
+        if PhotoState(current["state"]) is PhotoState.DRAFT:
+            # A candidate leaves no row behind. `mark_purged` keeps the row so the
+            # trail stays readable after the bytes are gone -- but a candidate has
+            # no trail, and a kept row would still read `draft` and make the partial
+            # unique index refuse this person's next upload.
+            await self._repository.discard_draft(person_uid)
+            return deleted
+
         await self._repository.mark_purged(
             person_uid=person_uid, version=version, actor=actor, objects_deleted=deleted
         )
