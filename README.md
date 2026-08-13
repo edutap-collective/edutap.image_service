@@ -32,6 +32,21 @@ whether a person has a real photograph, how it was verified, what that says abou
 its provenance — and whoever issues a card decides what to do with them. A generic
 service that grows one institution's policy stops being adoptable by the next one.
 
+## Running it
+
+```console
+docker build -t edutap-image-service .
+docker run --rm -p 8000:8000 \
+  -e IMAGE_SERVICE_DATABASE_DSN=postgresql+asyncpg://... \
+  -e IMAGE_SERVICE_S3_ENDPOINT=http://... \
+  edutap-image-service
+```
+
+Two stages; the runtime image carries the installed package and nothing that built
+it. The `kafka` extra is installed even though publishing events is optional --
+otherwise the deployments that publish would need a second image, and the flag
+already decides at runtime.
+
 ## Development
 
 ```console
