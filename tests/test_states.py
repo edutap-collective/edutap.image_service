@@ -20,6 +20,7 @@ from edutap.image_service.states import (
     purge,
     reactivate,
     reject,
+    withdraw,
 )
 
 NOW = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
@@ -207,3 +208,20 @@ def test_a_held_candidate_is_not_purgeable_either():
     """A hold can strike any state -- a reviewer may recognise a stranger's face."""
     with pytest.raises(UnderLegalHold):
         purge(PhotoState.DRAFT, legal_hold_since=NOW)
+
+
+def test_withdrawing_the_active_version_supersedes_it():
+    """It leaves the card, not the history: the person may switch back."""
+    outcome = withdraw(PhotoState.ACTIVE)
+    assert outcome.new_state is PhotoState.SUPERSEDED
+    assert outcome.supersede_active is False
+
+
+@pytest.mark.parametrize(
+    "state",
+    [PhotoState.DRAFT, PhotoState.PENDING, PhotoState.REJECTED, PhotoState.SUPERSEDED],
+)
+def test_only_the_active_version_can_be_withdrawn(state):
+    """Nothing else is on a card, so there is nothing to take off one."""
+    with pytest.raises(IllegalTransition):
+        withdraw(state)
