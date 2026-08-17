@@ -20,7 +20,7 @@ from ..ingest import Limits
 from ..manifest import manifest
 from ..objectstore import ObjectStore
 from ..service import PhotoService
-from ..settings import Settings, get_settings
+from ..settings import DatabaseSettings, Settings, get_settings
 from .routers import public, router
 
 
@@ -37,17 +37,27 @@ def _placeholder_bytes(settings: Settings) -> bytes:
     return asset.read_bytes()
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    database: DatabaseSettings | None = None,
+) -> FastAPI:
     """Build the application.
 
     A factory rather than a module-level instance, so a test can build one against
     its own settings without the import having already connected to something.
+
+    `database` is separate from `settings` because the two are read from different
+    prefixes and, in a deployment, from different places: the cluster coordinates
+    arrive as environment variables, the password as a mounted file. Both default to
+    reading their own environment, which is what the entry point wants; a test that
+    has a container to point at passes its own.
     """
     settings = settings or get_settings()
+    database = database or DatabaseSettings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = create_async_engine(settings.database_dsn)
+        engine = create_async_engine(database.async_url)
         http = httpx2.AsyncClient()
         store = ObjectStore(
             endpoint_url=settings.s3_endpoint,

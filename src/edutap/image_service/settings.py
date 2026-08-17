@@ -5,19 +5,86 @@ Every value a deployment can differ on is here rather than scattered through
 readable in one file.
 """
 
+import json
 from datetime import timedelta
 from functools import lru_cache
+from typing import Annotated, Any
 
-from pydantic import SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from edutap.db_definitions.settings import ASYNC_DRIVER, ClusterSettings
+from pydantic import SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+#: Where an orchestrator mounts secrets. pydantic-settings reads from here, so a
+#: password can arrive as a file instead of an environment variable -- and then it is
+#: never in the process environment at all, which means never in `docker inspect` and
+#: never in a frame local an error tracker collects.
+#:
+#: Two things worth knowing before wiring this up, both measured against
+#: pydantic-settings 2.15.0 rather than assumed:
+#:
+#: * **The file name carries the `env_prefix`.** The database password is read from
+#:   `/run/secrets/IMAGE_SERVICE_DB_password`, not `.../password`. A secret mounted
+#:   under the bare field name is silently ignored.
+#: * **A missing directory is harmless.** pydantic-settings emits a `UserWarning` and
+#:   falls back to the environment, so a developer without `/run/secrets` is not
+#:   blocked -- which is why this can be the default rather than a deployment switch.
+SECRETS_DIR = "/run/secrets"
+
+
+class DatabaseSettings(ClusterSettings):
+    """Where the photographs are recorded, prefix `IMAGE_SERVICE_DB_`.
+
+    Everything about *reaching* a cluster -- naming every node, asking for the one
+    that accepts writes, spelling TLS the way each driver wants it -- comes from
+    :class:`edutap.db_definitions.settings.ClusterSettings`. This package already
+    depended on `edutap.db_definitions` for the table definitions and built its own
+    connection string beside them, which is how it ended up with a single `host` and
+    a password in one string.
+
+    **The four fields are re-declared without defaults on purpose.** The base gives
+    them sensible ones for a development machine (`postgres`, `edutap`), and a
+    default is exactly wrong here: a deployment that misspells the prefix would then
+    start cleanly and write into *some* database rather than abort.
+
+    A prefix of its own, and not the service's: `user` and `database` would otherwise
+    collide with names that mean something else in :class:`Settings`.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="IMAGE_SERVICE_DB_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        secrets_dir=SECRETS_DIR,
+        extra="ignore",
+    )
+
+    #: Every node of the cluster, comma separated -- see :class:`ClusterSettings`.
+    hosts: str
+    database: str
+    user: str
+    password: SecretStr
+
+    @property
+    def async_url(self) -> str:
+        """Return the DSN for the async driver this service uses.
+
+        Note what this spares the deployment: the hosts move into repeated `host=`
+        query parameters with an explicit port each, which is the only form
+        SQLAlchemy hands to asyncpg as a *list*. The obvious `@a,b,c/database`
+        arrives as one hostname and fails with a name lookup error for a host that
+        does not exist.
+        """
+        return self.url(ASYNC_DRIVER)
 
 
 class Settings(BaseSettings):
     """Configuration of the person photo service, prefix `IMAGE_SERVICE_`."""
 
-    model_config = SettingsConfigDict(env_prefix="IMAGE_SERVICE_", env_file=".env")
-
-    database_dsn: str = "postgresql+asyncpg://edutap@localhost/edutap"
+    model_config = SettingsConfigDict(
+        env_prefix="IMAGE_SERVICE_",
+        env_file=".env",
+        secrets_dir=SECRETS_DIR,
+    )
 
     s3_endpoint: str = "http://localhost:9000"
     s3_bucket: str = "edutap"
@@ -78,14 +145,48 @@ class Settings(BaseSettings):
     is not one anybody else should adopt.
     """
 
-    service_tokens: dict[str, str] = {}
+    service_tokens: Annotated[dict[str, str], NoDecode] = {}
     """Tokens this service accepts, keyed by the name of the calling service.
 
     Keyed rather than a bare list so the review trail can record *which* service
     acted, and so one of them can be rotated without invalidating the others. An
     empty mapping refuses every authenticated route -- the safe direction for a
     deployment where nobody set them.
+
+    Best supplied as a mounted file, `/run/secrets/IMAGE_SERVICE_service_tokens`,
+    holding the same JSON. Every value in it is a credential, and an environment
+    variable is readable by anyone who can run `docker inspect`.
+
+    `NoDecode` because the decoding has to happen *here* rather than in the settings
+    source -- see :meth:`_tolerate_an_unset_value` for the failure that forces it.
     """
+
+    @field_validator("service_tokens", mode="before")
+    @classmethod
+    def _tolerate_an_unset_value(cls, value: Any) -> Any:
+        """Read the mapping, and treat a set-but-empty value as no mapping at all.
+
+        A compose file interpolating `${IMAGE_SERVICE_SERVICE_TOKENS}` without a
+        `:-` default produces the empty string, and an empty string is *set* -- so
+        the field default never applies and the raw value reaches a JSON parser.
+        Left to the settings source that is a `SettingsError` during construction,
+        which is to say the process does not start; under a restart policy it is a
+        loop, every nine seconds, with a traceback that names JSON rather than the
+        variable that is missing.
+
+        Refusing every authenticated route is the documented safe direction and the
+        one an operator can diagnose: the service answers, and it answers 401.
+
+        This is why the field carries `NoDecode`. The source decodes complex types
+        *before* any validator runs, so a validator alone would never see the value.
+        """
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            if not value.strip():
+                return {}
+            return json.loads(value)
+        return value
 
     max_upload_bytes: int = 10 * 1024 * 1024
     """Refused before the file is opened, so a bomb never reaches a decoder."""

@@ -91,6 +91,17 @@ markers = [
 # stay fast enough to run on every save. The integration job in CI adds the marker
 # back explicitly.
 addopts = "-m 'not integration'"
+# `secrets_dir` points at `/run/secrets`, which no developer machine has. That the
+# directory may be missing is the documented behaviour of the setting -- pydantic
+# -settings warns and falls back to the environment, which is exactly what a local
+# run wants. Left unfiltered it is eight identical warnings on every run, and a
+# suite whose output is noisy is one nobody reads.
+#
+# Only this one. A blanket `error` entry belongs here too, but it turns the
+# `HTTP_413_REQUEST_ENTITY_TOO_LARGE` deprecation that starlette already emits into
+# a failing test -- a change worth making on its own, not smuggled in beside a
+# settings refactor.
+filterwarnings = ['ignore:directory "/run/secrets" does not exist:UserWarning']
 
 [tool.ruff]
 line-length = 100
