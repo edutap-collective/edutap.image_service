@@ -37,8 +37,13 @@ service that grows one institution's policy stops being adoptable by the next on
 ```console
 docker build -t edutap-image-service .
 docker run --rm -p 8000:8000 \
-  -e IMAGE_SERVICE_DATABASE_DSN=postgresql+asyncpg://... \
+  -e IMAGE_SERVICE_DB_HOSTS=pg-a,pg-b,pg-c \
+  -e IMAGE_SERVICE_DB_DATABASE=edutap \
+  -e IMAGE_SERVICE_DB_USER=edutap \
+  -e IMAGE_SERVICE_DB_SSLMODE=verify-full \
+  -e PGSSLROOTCERT=/run/certs/ca.pem \
   -e IMAGE_SERVICE_S3_ENDPOINT=http://... \
+  -v /path/to/secrets:/run/secrets:ro \
   edutap-image-service
 ```
 
@@ -46,6 +51,35 @@ Two stages; the runtime image carries the installed package and nothing that bui
 it. The `kafka` extra is installed even though publishing events is optional --
 otherwise the deployments that publish would need a second image, and the flag
 already decides at runtime.
+
+### Secrets are files, not variables
+
+Three values are credentials and are read from `/run/secrets` rather than from the
+environment, so that they appear in no `docker inspect` and in no frame local an
+error tracker collects. **The file name carries the prefix of the settings class it
+belongs to:**
+
+| File | What it holds |
+| --- | --- |
+| `/run/secrets/IMAGE_SERVICE_DB_password` | the database password |
+| `/run/secrets/IMAGE_SERVICE_s3_secret_key` | the object store secret |
+| `/run/secrets/IMAGE_SERVICE_service_tokens` | the caller → token mapping, as JSON |
+
+A secret mounted under the bare field name is silently ignored. Each may still be
+given as an environment variable, which is what a development machine does; a
+missing `/run/secrets` is harmless and falls back to the environment.
+
+### Reaching a cluster
+
+`IMAGE_SERVICE_DB_HOSTS` takes every node, comma separated, each optionally with its
+own port. All of them reach the driver, and `target_session_attrs` (default
+`read-write`) is what finds the one that accepts writes — naming a single node is
+what breaks at the next failover, and a connection to a replica *succeeds* and fails
+only at the first write.
+
+TLS is spelled `IMAGE_SERVICE_DB_SSLMODE`. The CA that verifies the server reaches
+asyncpg **only** through the environment variable `PGSSLROOTCERT`, never as a
+connect argument — so a deployment that requires `verify-full` sets both.
 
 ## Development
 
