@@ -8,6 +8,10 @@ version = "0.1.0"
 description = "Stores, reviews and delivers the photograph of a person for eduTAP"
 readme = "README.md"
 requires-python = ">=3.13"
+classifiers = [
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
 license = "EUPL-1.2"
 authors = [{ name = "eduTAP" }]
 dependencies = [
