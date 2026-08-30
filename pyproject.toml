@@ -15,6 +15,18 @@ classifiers = [
 license = "EUPL-1.2"
 authors = [{ name = "eduTAP" }]
 dependencies = [
+    # Error reporting, tracing and structured logging in one call, from the house
+    # package. The option set behind it was chosen against measurements and is
+    # worth nothing sitting next to a second copy of the `sentry_sdk.init()` that
+    # applies it. It brings sentry-sdk, structlog and logfire with it.
+    #
+    # `[fastapi]` IS NOT OPTIONAL: `instrument_fastapi_safely` needs
+    # `opentelemetry-instrumentation-fastapi`, and bare `logfire` does not carry
+    # it. Without the extra the start ends in `ModuleNotFoundError:
+    # opentelemetry.instrumentation.asgi` -- but ONLY where
+    # `OTEL_EXPORTER_OTLP_ENDPOINT` is set, which is a cluster and not a
+    # developer's machine.
+    "edutap.observability_settings[fastapi]>=0.1.6,<0.2",
     "aioboto3>=13",
     "asyncpg>=0.29",
     # PEP 508 direct references: public but not published to a public index, pinned
