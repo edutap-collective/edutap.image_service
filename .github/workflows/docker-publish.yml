@@ -17,7 +17,16 @@ name: Publish container image
 on:
   push:
     branches: ["main"]
-    tags: ["v*.*.*"]
+    # Date versions, not semver: this is a SERVICE. The house convention splits
+    # on the kind of artefact -- a service is deployed and pinned by the date it
+    # was built, a library is depended upon and needs an ordered version. The
+    # pattern is the one edutap.wallet_google_callback_handler already uses, and
+    # `type=ref,event=tag` below takes the tag name verbatim, so the git tag and
+    # the image tag are the same string.
+    #
+    # A push to main still publishes `latest` and `sha-...`; those are for
+    # looking, not for pinning. A deployment pins <date-tag>@sha256:<digest>.
+    tags: ["20[0-9][0-9]-[0-1][0-9]-[0-3][0-9]_[0-2][0-9][0-5][0-9]"]
   pull_request:
     branches: ["main"]
   workflow_dispatch:
