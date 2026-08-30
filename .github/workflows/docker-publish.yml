@@ -75,8 +75,13 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            # `type=ref,event=tag` takes the tag name VERBATIM, which is what a
+            # date version needs. The two `type=semver` rules that stood here
+            # produced NOTHING for a tag like 2026-08-30_0326 -- and did so
+            # silently: the build ran, reported success, and pushed only
+            # `sha-<...>`. A green run that published no usable tag is worse
+            # than a failed one, because nobody goes looking.
+            type=ref,event=tag
             type=sha,format=long
             type=raw,value=latest,enable={{is_default_branch}}
 
