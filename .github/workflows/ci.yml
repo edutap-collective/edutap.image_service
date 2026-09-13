@@ -22,7 +22,7 @@ jobs:
         python: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: ${{ matrix.python }}
       - run: uv venv
@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.13"
       - run: uv venv
@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.13"
       - run: uv venv
