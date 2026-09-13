@@ -1,0 +1,94 @@
+name: Scan the published image
+
+# A daily vulnerability scan of the image this repository publishes, with the
+# findings written to this repository's Security tab.
+#
+# WHY THIS BELONGS HERE AND NOT ONLY IN A DEPLOYMENT.
+#
+# A vulnerability report is a statement by whoever publishes the artefact. This
+# repository publishes a container image to a public registry; anyone may pull
+# it and run it. If the scan only existed in one operator's deployment, every
+# other operator would have to build the same check for themselves -- and each
+# of them would arrive at a slightly different answer, at a different time,
+# with no way to compare notes.
+#
+# The scan therefore runs where the image is made. The Security tab is public
+# for a public repository, so the answer is available to everyone who uses the
+# image, not just to the one operator who happened to look.
+#
+# WHY DAILY AND NOT ON PUBLISH.
+#
+# An SBOM is a statement about a build and never changes. A vulnerability
+# finding is a statement about a day: the same unchanged image is clean today
+# and affected tomorrow, because someone published an advisory in between.
+# Scanning only at publish time would answer the question once and then let the
+# answer rot. Nothing about the image changes between these runs -- the
+# knowledge about it does.
+
+on:
+  schedule:
+    # 05:21 UTC. Deliberately not on the hour: GitHub queues scheduled runs
+    # across all of its users, and runs requested on the hour are the ones that
+    # get delayed. The odd minute is worth a few minutes of punctuality.
+    - cron: "21 5 * * *"
+  # So a maintainer can ask the question after a release instead of waiting for
+  # the next morning.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Required to upload the SARIF report to the Security tab. Nothing else in
+  # this workflow needs a token: the image is public, so the scan pulls it
+  # anonymously.
+  security-events: write
+
+concurrency:
+  group: scan-image
+  cancel-in-progress: true
+
+jobs:
+  grype:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Scan the published image
+        id: scan
+        uses: anchore/scan-action@v7.4.2
+        with:
+          # Same expression as the publish workflow uses for its image name, so
+          # a repository rename carries both along without an edit here.
+          image: ghcr.io/${{ github.repository }}:latest
+
+          # The job reports, it does not gate. A scheduled run that turns red
+          # because an advisory appeared overnight tells a maintainer nothing
+          # they can act on before breakfast, and a workflow that is red most
+          # mornings stops being read. The findings are in the Security tab,
+          # which is where they can be triaged.
+          fail-build: false
+
+          # ONLY WHAT CAN BE FIXED. Without this, the report is dominated by
+          # findings that have no fix at all: a `python:3.x-slim` image carries
+          # roughly 178 of them, identical across every image built on it, and
+          # they would bury the handful that a version bump would actually
+          # resolve. Those 178 are the cost of using a Debian base -- a real
+          # trade-off, but not one that belongs in a daily alert.
+          only-fixed: true
+
+          # The action's own default, spelled out so that changing it is a
+          # decision rather than an upgrade side effect.
+          severity-cutoff: medium
+
+          # The vulnerability database is around 2 GiB unpacked. Caching it
+          # between runs keeps a daily scan cheap; Grype refuses to use a
+          # database older than 120 hours, so a stale cache cannot silently
+          # produce yesterday's answer.
+          cache-db: true
+
+      - name: Publish the findings to the Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          # A category keeps these findings separate from any other analysis
+          # this repository may upload later; without it, two tools overwrite
+          # each other's results.
+          category: grype-container
