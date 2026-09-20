@@ -21,7 +21,7 @@ jobs:
       matrix:
         python: ["3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python }}
@@ -33,7 +33,7 @@ jobs:
     # database-backed behaviour would never be exercised in CI.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.13"
@@ -43,7 +43,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.13"
