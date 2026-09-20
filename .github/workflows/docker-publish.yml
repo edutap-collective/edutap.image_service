@@ -53,7 +53,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Skipped on pull requests: a fork must not be able to push an image.
       # The build itself still runs, so a broken Dockerfile fails the review.
