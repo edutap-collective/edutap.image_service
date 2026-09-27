@@ -26,7 +26,7 @@ dependencies = [
     # opentelemetry.instrumentation.asgi` -- but ONLY where
     # `OTEL_EXPORTER_OTLP_ENDPOINT` is set, which is a cluster and not a
     # developer's machine.
-    "edutap.observability_settings[fastapi]>=0.1.6,<0.2",
+    "edutap.observability_settings[fastapi]>=0.2,<0.3",
     "aioboto3>=13",
     "asyncpg>=0.29",
     # PEP 508 direct references: public but not published to a public index, pinned
