@@ -85,7 +85,7 @@ jobs:
           cache-db: true
 
       - name: Publish the findings to the Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: ${{ steps.scan.outputs.sarif }}
           # A category keeps these findings separate from any other analysis
