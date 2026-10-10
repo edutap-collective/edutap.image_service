@@ -78,7 +78,7 @@ dev = [
     # Pinned below 0.17 for the same reason as the sibling packages: a minor bump
     # has changed formatting output before, which turns `format --check` red in a
     # pull request that touched nothing.
-    "ruff>=0.16,<0.17",
+    "ruff>=0.17,<0.18",
     "testcontainers[postgres]>=4.8",
     "ty",
 ]
