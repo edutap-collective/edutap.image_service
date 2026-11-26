@@ -53,7 +53,7 @@ jobs:
     steps:
       - name: Scan the published image
         id: scan
-        uses: anchore/scan-action@v7.4.2
+        uses: anchore/scan-action@v7.4.3
         with:
           # Same expression as the publish workflow uses for its image name, so
           # a repository rename carries both along without an edit here.
